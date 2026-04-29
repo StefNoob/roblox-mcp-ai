@@ -17,7 +17,7 @@ describe('BridgeService', () => {
       const endpoint = '/api/test';
       const data = { test: 'data' };
 
-      const requestPromise = bridgeService.sendRequest(endpoint, data);
+      bridgeService.sendRequest(endpoint, data);
 
       const pendingRequest = bridgeService.getPendingRequest();
       expect(pendingRequest).toBeTruthy();

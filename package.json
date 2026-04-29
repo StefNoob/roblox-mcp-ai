@@ -47,7 +47,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "test:e2e": "lune run tests/luau/e2e.luau",
+    "test:e2e": "node scripts/run-luau-e2e.mjs",
     "test:all": "npm test && npm run test:e2e",
     "prepublishOnly": "npm run build:all"
   },

@@ -1,9 +1,22 @@
-import { Connection } from "../types";
+import { ActivityEntry, ActivityLevel, Connection, PluginSettings } from "../types";
 
 const CURRENT_VERSION = "__VERSION__";
 const MAX_CONNECTIONS = 5;
 const BASE_PORT = 3002;
+const MAX_ACTIVITY_ITEMS = 120;
 let activeTabIndex = 0;
+let activityCounter = 0;
+
+const defaultSettings: PluginSettings = {
+	parallelAgents: 2,
+	useLightModel: false,
+	useStructureMapping: true,
+	autoPortDiscovery: true,
+	verboseActivity: true,
+};
+
+let pluginSettings: PluginSettings = { ...defaultSettings };
+const activityItems: ActivityEntry[] = [];
 
 function createConnection(port: number): Connection {
 	return {
@@ -72,10 +85,53 @@ function getConnections(): Connection[] {
 	return connections;
 }
 
+function getDefaultSettings(): PluginSettings {
+	return { ...defaultSettings };
+}
+
+function setPluginSettings(settings: PluginSettings): void {
+	pluginSettings = { ...settings };
+}
+
+function updatePluginSettings(patch: Partial<PluginSettings>): PluginSettings {
+	pluginSettings = { ...pluginSettings, ...patch };
+	return { ...pluginSettings };
+}
+
+function getPluginSettings(): PluginSettings {
+	return { ...pluginSettings };
+}
+
+function addActivity(level: ActivityLevel, title: string, detail: string, endpoint?: string): ActivityEntry {
+	activityCounter += 1;
+	const item: ActivityEntry = {
+		id: activityCounter,
+		timestamp: tick(),
+		level,
+		title,
+		detail,
+		endpoint,
+	};
+	activityItems.unshift(item);
+	if (activityItems.size() > MAX_ACTIVITY_ITEMS) {
+		activityItems.pop();
+	}
+	return item;
+}
+
+function getActivity(): ActivityEntry[] {
+	return activityItems;
+}
+
+function clearActivity(): void {
+	activityItems.clear();
+}
+
 export = {
 	CURRENT_VERSION,
 	MAX_CONNECTIONS,
 	BASE_PORT,
+	MAX_ACTIVITY_ITEMS,
 	connections,
 	addConnection,
 	removeConnection,
@@ -84,4 +140,11 @@ export = {
 	getActiveTabIndex,
 	setActiveTabIndex,
 	getConnections,
+	getDefaultSettings,
+	setPluginSettings,
+	updatePluginSettings,
+	getPluginSettings,
+	addActivity,
+	getActivity,
+	clearActivity,
 };

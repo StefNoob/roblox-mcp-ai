@@ -9,7 +9,9 @@ local TS = require(script.include.RuntimeLib)
 local State = TS.import(script, script, "modules", "State")
 local UI = TS.import(script, script, "modules", "UI")
 local Communication = TS.import(script, script, "modules", "Communication")
+local StructureMap = TS.import(script, script, "modules", "StructureMap")
 UI.init(plugin)
+StructureMap.init()
 local elements = UI.getElements()
 local toolbar = plugin:CreateToolbar("MCP Integration")
 local button = toolbar:CreateButton("MCP Server", "Connect to MCP Server for AI Integration", "rbxassetid://10734944444")
@@ -26,6 +28,7 @@ button.Click:Connect(function()
 end)
 plugin.Unloading:Connect(function()
 	Communication.deactivateAll()
+	StructureMap.shutdown()
 end)
 UI.updateUIState()
 Communication.checkForUpdates()
@@ -52,6 +55,7 @@ local InstanceHandlers = TS.import(script, script.Parent, "handlers", "InstanceH
 local ScriptHandlers = TS.import(script, script.Parent, "handlers", "ScriptHandlers")
 local MetadataHandlers = TS.import(script, script.Parent, "handlers", "MetadataHandlers")
 local TestHandlers = TS.import(script, script.Parent, "handlers", "TestHandlers")
+local StructureMap = TS.import(script, script.Parent, "StructureMap")
 local routeMap = {
 	["/api/file-tree"] = QueryHandlers.getFileTree,
 	["/api/search-files"] = QueryHandlers.searchFiles,
@@ -63,6 +67,10 @@ local routeMap = {
 	["/api/search-by-property"] = QueryHandlers.searchByProperty,
 	["/api/class-info"] = QueryHandlers.getClassInfo,
 	["/api/project-structure"] = QueryHandlers.getProjectStructure,
+	["/api/structure-map-summary"] = StructureMap.getStructureMapSummary,
+	["/api/query-structure-map"] = StructureMap.queryStructureMap,
+	["/api/script-inventory"] = StructureMap.getScriptInventory,
+	["/api/refresh-structure-map"] = StructureMap.refreshStructureMap,
 	["/api/set-property"] = PropertyHandlers.setProperty,
 	["/api/mass-set-property"] = PropertyHandlers.massSetProperty,
 	["/api/mass-get-property"] = PropertyHandlers.massGetProperty,
@@ -133,6 +141,7 @@ local function getConnectionStatus(connIndex)
 	end
 	return "connecting"
 end
+local discoverPort
 local function pollForRequests(connIndex)
 	local conn = State.getConnection(connIndex)
 	if not conn or not conn.isActive then
@@ -207,6 +216,18 @@ local function pollForRequests(connIndex)
 				end
 				local elapsed = _exp - _condition_1
 				el.troubleshootLabel.Visible = elapsed > 8
+				if elapsed > 3 and elapsed % 5 < conn.pollInterval then
+					task.spawn(function()
+						local discovered = discoverPort()
+						if discovered ~= nil and discovered ~= conn.port then
+							conn.port = discovered
+							conn.serverUrl = `http://localhost:{discovered}`
+							if connIndex == State.getActiveTabIndex() then
+								UI.getElements().urlInput.Text = conn.serverUrl
+							end
+						end
+					end)
+				end
 				UI.startPulseAnimation()
 			end
 		end
@@ -228,6 +249,20 @@ local function pollForRequests(connIndex)
 		conn.consecutiveFailures += 1
 		if conn.consecutiveFailures > 1 then
 			conn.currentRetryDelay = math.min(conn.currentRetryDelay * conn.retryBackoffMultiplier, conn.maxRetryDelay)
+		end
+		if conn.consecutiveFailures == 5 or conn.consecutiveFailures % 20 == 0 then
+			task.spawn(function()
+				local discovered = discoverPort()
+				if discovered ~= nil and discovered ~= conn.port then
+					conn.port = discovered
+					conn.serverUrl = `http://localhost:{discovered}`
+					conn.consecutiveFailures = 0
+					conn.currentRetryDelay = 0.5
+					if connIndex == State.getActiveTabIndex() then
+						UI.getElements().urlInput.Text = conn.serverUrl
+					end
+				end
+			end)
 		end
 		if connIndex == State.getActiveTabIndex() then
 			local el = ui
@@ -287,7 +322,8 @@ local function pollForRequests(connIndex)
 		end
 	end
 end
-local function discoverPort()
+function discoverPort()
+	local firstActivePort
 	for offset = 0, 4 do
 		local port = State.BASE_PORT + offset
 		local success, result = pcall(function()
@@ -303,12 +339,17 @@ local function discoverPort()
 			local ok, data = pcall(function()
 				return HttpService:JSONDecode(result.Body)
 			end)
-			if ok and data.pluginConnected == false then
-				return port
+			if ok and data.mcpServerActive then
+				if not data.pluginConnected then
+					return port
+				end
+				if firstActivePort == nil then
+					firstActivePort = port
+				end
 			end
 		end
 	end
-	return nil
+	return firstActivePort
 end
 local function activatePlugin(connIndex)
 	local _condition = connIndex
@@ -338,16 +379,6 @@ local function activatePlugin(connIndex)
 		UI.updateUIState()
 	end
 	UI.updateTabDot(idx)
-	if not conn.heartbeatConnection then
-		conn.heartbeatConnection = RunService.Heartbeat:Connect(function()
-			local now = tick()
-			local currentInterval = if conn.consecutiveFailures > 5 then conn.currentRetryDelay else conn.pollInterval
-			if now - conn.lastPoll > currentInterval then
-				conn.lastPoll = now
-				pollForRequests(idx)
-			end
-		end)
-	end
 	task.spawn(function()
 		local discoveredPort = discoverPort()
 		if discoveredPort ~= nil then
@@ -356,6 +387,16 @@ local function activatePlugin(connIndex)
 			if idx == State.getActiveTabIndex() then
 				ui.urlInput.Text = conn.serverUrl
 			end
+		end
+		if not conn.heartbeatConnection then
+			conn.heartbeatConnection = RunService.Heartbeat:Connect(function()
+				local now = tick()
+				local currentInterval = if conn.consecutiveFailures > 5 then conn.currentRetryDelay else conn.pollInterval
+				if now - conn.lastPoll > currentInterval then
+					conn.lastPoll = now
+					pollForRequests(idx)
+				end
+			end)
 		end
 		pcall(function()
 			HttpService:RequestAsync({
@@ -2515,6 +2556,7 @@ return {
             <string name="Source"><![CDATA[-- Compiled with roblox-ts v3.0.0
 local TS = require(script.Parent.Parent.Parent.include.RuntimeLib)
 local Utils = TS.import(script, script.Parent.Parent, "Utils")
+local StructureMap = TS.import(script, script.Parent.Parent, "StructureMap")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
 local _binding = Utils
@@ -2523,18 +2565,11 @@ local getInstanceByPath = _binding.getInstanceByPath
 local readScriptSource = _binding.readScriptSource
 local splitLines = _binding.splitLines
 local joinLines = _binding.joinLines
-local function normalizeEscapes(s)
-	local result = s
-	result = (string.gsub(result, "\\n", "\n"))
-	result = (string.gsub(result, "\\t", "\t"))
-	result = (string.gsub(result, "\\r", "\r"))
-	result = (string.gsub(result, "\\\\", "\\"))
-	return result
-end
 local function getScriptSource(requestData)
 	local instancePath = requestData.instancePath
 	local startLine = requestData.startLine
 	local endLine = requestData.endLine
+	local fullSourceRequested = requestData.fullSource == true
 	if not (instancePath ~= "" and instancePath) then
 		return {
 			error = "Instance path is required",
@@ -2618,7 +2653,7 @@ local function getScriptSource(requestData)
 			isPartial = startLine ~= nil or endLine ~= nil,
 			truncated = false,
 		}
-		if startLine == nil and endLine == nil and #fullSource > 50000 then
+		if not fullSourceRequested and startLine == nil and endLine == nil and #fullSource > 50000 then
 			local truncatedLines = {}
 			local truncatedNumberedLines = {}
 			local maxLines = math.min(1000, #lines)
@@ -2678,7 +2713,7 @@ local function setScriptSource(requestData)
 			error = `Instance is not a script-like object: {instance.ClassName}`,
 		}
 	end
-	local sourceToSet = normalizeEscapes(newSource)
+	local sourceToSet = newSource
 	local updateSuccess, updateResult = pcall(function()
 		local oldSourceLength = #readScriptSource(instance)
 		ScriptEditorService:UpdateSourceAsync(instance, function()
@@ -2695,6 +2730,7 @@ local function setScriptSource(requestData)
 		}
 	end)
 	if updateSuccess then
+		StructureMap.markDirty("set-script-source")
 		return updateResult
 	end
 	local directSuccess, directResult = pcall(function()
@@ -2711,6 +2747,7 @@ local function setScriptSource(requestData)
 		}
 	end)
 	if directSuccess then
+		StructureMap.markDirty("set-script-source")
 		return directResult
 	end
 	local replaceSuccess, replaceResult = pcall(function()
@@ -2736,6 +2773,7 @@ local function setScriptSource(requestData)
 		}
 	end)
 	if replaceSuccess then
+		StructureMap.markDirty("set-script-source")
 		return replaceResult
 	end
 	return {
@@ -2752,7 +2790,6 @@ local function editScriptLines(requestData)
 			error = "Instance path, startLine, endLine, and newContent are required",
 		}
 	end
-	newContent = normalizeEscapes(newContent)
 	local instance = getInstanceByPath(instancePath)
 	if not instance then
 		return {
@@ -2829,6 +2866,7 @@ local function editScriptLines(requestData)
 		}
 	end)
 	if success then
+		StructureMap.markDirty("edit-script-lines")
 		return result
 	end
 	return {
@@ -2848,7 +2886,6 @@ local function insertScriptLines(requestData)
 			error = "Instance path and newContent are required",
 		}
 	end
-	newContent = normalizeEscapes(newContent)
 	local instance = getInstanceByPath(instancePath)
 	if not instance then
 		return {
@@ -2918,6 +2955,7 @@ local function insertScriptLines(requestData)
 		}
 	end)
 	if success then
+		StructureMap.markDirty("insert-script-lines")
 		return result
 	end
 	return {
@@ -3004,6 +3042,7 @@ local function deleteScriptLines(requestData)
 		}
 	end)
 	if success then
+		StructureMap.markDirty("delete-script-lines")
 		return result
 	end
 	return {
@@ -3175,7 +3214,7 @@ return {
           <string name="Source"><![CDATA[-- Compiled with roblox-ts v3.0.0
 local CURRENT_VERSION = "2.3.0"
 local MAX_CONNECTIONS = 5
-local BASE_PORT = 58741
+local BASE_PORT = 3002
 local activeTabIndex = 0
 local function createConnection(port)
 	return {
@@ -3261,6 +3300,448 @@ return {
         </Properties>
       </Item>
       <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">StructureMap</string>
+          <string name="Source"><![CDATA[-- Compiled with roblox-ts v3.0.0
+local TS = require(script.Parent.Parent.include.RuntimeLib)
+local CollectionService = TS.import(script, script.Parent.Parent, "node_modules", "@rbxts", "services").CollectionService
+local Utils = TS.import(script, script.Parent, "Utils")
+local _binding = Utils
+local getInstancePath = _binding.getInstancePath
+local getInstanceByPath = _binding.getInstanceByPath
+local readScriptSource = _binding.readScriptSource
+local initialized = false
+local dirty = true
+local version = 0
+local lastBuiltAt = 0
+local lastReason = "startup"
+local nodesByPath = {}
+local roots = {}
+local watchedNodes = {}
+local descendantAddedConnection
+local descendantRemovingConnection
+local function inferSubsystem(path)
+	local cleaned = (string.gsub(path, "^game%.", ""))
+	local segments = string.split(cleaned, ".")
+	local keywords = { "AI", "Combat", "Inventory", "UI", "Tycoon", "Data", "Player", "Shop", "Quest", "NPC" }
+	for _, segment in segments do
+		for _1, keyword in keywords do
+			local _exp = string.lower(segment)
+			local _arg0 = string.lower(keyword)
+			if (string.find(_exp, _arg0)) ~= nil then
+				return keyword
+			end
+		end
+	end
+	return if #segments >= 2 then segments[2] else nil
+end
+local function hashText(text)
+	local hash = 2166136261
+	for i = 0, #text - 1 do
+		local code = string.byte(text, i + 1)
+		hash = bit32.bxor(hash, code)
+		hash = bit32.band(hash * 16777619, 0xffffffff)
+	end
+	return `fnv32:{string.format("%08x", hash)}`
+end
+local markDirty
+local function watchNode(instance)
+	local _instance = instance
+	if watchedNodes[_instance] ~= nil then
+		return nil
+	end
+	local connections = {}
+	local _arg0 = instance:GetPropertyChangedSignal("Name"):Connect(function()
+		return markDirty("rename")
+	end)
+	table.insert(connections, _arg0)
+	local _arg0_1 = instance.AncestryChanged:Connect(function()
+		return markDirty("ancestry")
+	end)
+	table.insert(connections, _arg0_1)
+	local _instance_1 = instance
+	watchedNodes[_instance_1] = connections
+end
+local function unwatchNode(instance)
+	local _instance = instance
+	local existing = watchedNodes[_instance]
+	if not existing then
+		return nil
+	end
+	for _, connection in existing do
+		connection:Disconnect()
+	end
+	local _instance_1 = instance
+	watchedNodes[_instance_1] = nil
+end
+local function snapshotNode(instance)
+	local path = getInstancePath(instance)
+	local _exp = instance:GetChildren()
+	-- ▼ ReadonlyArray.map ▼
+	local _newValue = table.create(#_exp)
+	local _callback = function(child)
+		return getInstancePath(child)
+	end
+	for _k, _v in _exp do
+		_newValue[_k] = _callback(_v, _k - 1, _exp)
+	end
+	-- ▲ ReadonlyArray.map ▲
+	local childPaths = _newValue
+	local tags = CollectionService:GetTags(instance)
+	local attributeNames = {}
+	for name in pairs(instance:GetAttributes()) do
+		table.insert(attributeNames, name)
+	end
+	local node = {
+		path = path,
+		name = instance.Name,
+		className = instance.ClassName,
+		parentPath = if instance.Parent then getInstancePath(instance.Parent) else nil,
+		childPaths = childPaths,
+		childCount = #childPaths,
+		hasChildren = #childPaths > 0,
+		hasSource = instance:IsA("LuaSourceContainer"),
+		summaryStatus = "missing",
+		subsystem = inferSubsystem(path),
+	}
+	if instance:IsA("LuaSourceContainer") then
+		node.scriptType = instance.ClassName
+	end
+	if instance:IsA("BaseScript") then
+		node.enabled = instance.Enabled
+	end
+	if #tags > 0 then
+		node.tags = tags
+	end
+	if #attributeNames > 0 then
+		node.attributeNames = attributeNames
+	end
+	return node
+end
+local function rebuild()
+	table.clear(nodesByPath)
+	table.clear(roots)
+	for instance in watchedNodes do
+		unwatchNode(instance)
+	end
+	local visit
+	visit = function(instance)
+		watchNode(instance)
+		local node = snapshotNode(instance)
+		local _path = node.path
+		nodesByPath[_path] = node
+		for _, child in instance:GetChildren() do
+			visit(child)
+		end
+	end
+	for _, child in game:GetChildren() do
+		local _arg0 = getInstancePath(child)
+		table.insert(roots, _arg0)
+		visit(child)
+	end
+	version += 1
+	lastBuiltAt = tick()
+	dirty = false
+end
+local function ensureFresh()
+	local _condition = dirty
+	if not _condition then
+		-- ▼ ReadonlyMap.size ▼
+		local _size = 0
+		for _ in nodesByPath do
+			_size += 1
+		end
+		-- ▲ ReadonlyMap.size ▲
+		_condition = _size == 0
+	end
+	if _condition then
+		rebuild()
+	end
+end
+function markDirty(reason)
+	if reason == nil then
+		reason = "unknown"
+	end
+	dirty = true
+	lastReason = reason
+end
+local function ensureScriptHashes()
+	ensureFresh()
+	for _, node in nodesByPath do
+		if not node.hasSource then
+			continue
+		end
+		local instance = getInstanceByPath(node.path)
+		if instance and instance:IsA("LuaSourceContainer") then
+			local source = readScriptSource(instance)
+			node.sourceHash = hashText(source)
+		end
+	end
+end
+local function shapeNode(node, mode)
+	local compact = {
+		path = node.path,
+		name = node.name,
+		className = node.className,
+		hasSource = node.hasSource,
+		subsystem = node.subsystem,
+	}
+	if mode == "compact" then
+		return compact
+	end
+	local _object = table.clone(compact)
+	setmetatable(_object, nil)
+	_object.parentPath = node.parentPath
+	_object.childCount = node.childCount
+	_object.scriptType = node.scriptType
+	_object.enabled = node.enabled
+	_object.summaryStatus = node.summaryStatus
+	_object.sourceHash = node.sourceHash
+	local standard = _object
+	if mode == "standard" then
+		return standard
+	end
+	local _object_1 = table.clone(standard)
+	setmetatable(_object_1, nil)
+	_object_1.childPaths = node.childPaths
+	_object_1.tags = node.tags or {}
+	_object_1.attributeNames = node.attributeNames or {}
+	_object_1.hasChildren = node.hasChildren
+	return _object_1
+end
+local function getStructureMapSummary(_requestData)
+	ensureFresh()
+	local scriptCount = 0
+	for _, node in nodesByPath do
+		if node.hasSource then
+			scriptCount += 1
+		end
+	end
+	local _object = {
+		placeId = game.PlaceId,
+		placeName = game.Name,
+		version = version,
+	}
+	local _left = "nodeCount"
+	-- ▼ ReadonlyMap.size ▼
+	local _size = 0
+	for _ in nodesByPath do
+		_size += 1
+	end
+	-- ▲ ReadonlyMap.size ▲
+	_object[_left] = _size
+	_object.scriptCount = scriptCount
+	_object.rootCount = #roots
+	_object.roots = roots
+	_object.dirty = dirty
+	_object.lastBuiltAt = lastBuiltAt
+	_object.lastReason = lastReason
+	return _object
+end
+local function queryStructureMap(requestData)
+	ensureFresh()
+	local mode = (requestData.mode) or "compact"
+	local filters = (requestData.filters) or {}
+	local _condition = filters.limit
+	if _condition == nil then
+		_condition = 250
+	end
+	local limit = _condition
+	local _pathPrefix = filters.pathPrefix
+	if _pathPrefix ~= nil then
+		_pathPrefix = string.lower(_pathPrefix)
+	end
+	local pathPrefix = _pathPrefix
+	local _className = filters.className
+	if _className ~= nil then
+		_className = string.lower(_className)
+	end
+	local className = _className
+	local _scriptType = filters.scriptType
+	if _scriptType ~= nil then
+		_scriptType = string.lower(_scriptType)
+	end
+	local scriptType = _scriptType
+	local _subsystem = filters.subsystem
+	if _subsystem ~= nil then
+		_subsystem = string.lower(_subsystem)
+	end
+	local subsystem = _subsystem
+	local _nameQuery = filters.nameQuery
+	if _nameQuery ~= nil then
+		_nameQuery = string.lower(_nameQuery)
+	end
+	local nameQuery = _nameQuery
+	local matches = {}
+	for _, node in nodesByPath do
+		local _condition_1 = pathPrefix
+		if _condition_1 ~= "" and _condition_1 then
+			_condition_1 = (string.find(string.lower(node.path), pathPrefix)) == nil
+		end
+		if _condition_1 ~= "" and _condition_1 then
+			continue
+		end
+		local _condition_2 = className
+		if _condition_2 ~= "" and _condition_2 then
+			_condition_2 = string.lower(node.className) ~= className
+		end
+		if _condition_2 ~= "" and _condition_2 then
+			continue
+		end
+		if filters.hasSource ~= nil and node.hasSource ~= filters.hasSource then
+			continue
+		end
+		local _condition_3 = scriptType
+		if _condition_3 ~= "" and _condition_3 then
+			local _condition_4 = node.scriptType
+			if _condition_4 == nil then
+				_condition_4 = ""
+			end
+			_condition_3 = string.lower(_condition_4) ~= scriptType
+		end
+		if _condition_3 ~= "" and _condition_3 then
+			continue
+		end
+		local _condition_4 = subsystem
+		if _condition_4 ~= "" and _condition_4 then
+			local _condition_5 = node.subsystem
+			if _condition_5 == nil then
+				_condition_5 = ""
+			end
+			_condition_4 = string.lower(_condition_5) ~= subsystem
+		end
+		if _condition_4 ~= "" and _condition_4 then
+			continue
+		end
+		local _condition_5 = nameQuery
+		if _condition_5 ~= "" and _condition_5 then
+			_condition_5 = (string.find(string.lower(node.name), nameQuery)) == nil
+		end
+		if _condition_5 ~= "" and _condition_5 then
+			continue
+		end
+		local _arg0 = shapeNode(node, mode)
+		table.insert(matches, _arg0)
+		if #matches >= limit then
+			break
+		end
+	end
+	return {
+		placeId = game.PlaceId,
+		placeName = game.Name,
+		version = version,
+		mode = mode,
+		count = #matches,
+		nodes = matches,
+	}
+end
+local function getScriptInventory(requestData)
+	local mode = (requestData.mode) or "compact"
+	ensureScriptHashes()
+	local _array = {}
+	local _length = #_array
+	for _k, _v in nodesByPath do
+		_length += 1
+		_array[_length] = { _k, _v }
+	end
+	-- ▼ ReadonlyArray.map ▼
+	local _newValue = table.create(#_array)
+	local _callback = function(_param)
+		local node = _param[2]
+		return node
+	end
+	for _k, _v in _array do
+		_newValue[_k] = _callback(_v, _k - 1, _array)
+	end
+	-- ▲ ReadonlyArray.map ▲
+	-- ▼ ReadonlyArray.filter ▼
+	local _newValue_1 = {}
+	local _callback_1 = function(node)
+		return node.hasSource
+	end
+	local _length_1 = 0
+	for _k, _v in _newValue do
+		if _callback_1(_v, _k - 1, _newValue) == true then
+			_length_1 += 1
+			_newValue_1[_length_1] = _v
+		end
+	end
+	-- ▲ ReadonlyArray.filter ▲
+	-- ▼ ReadonlyArray.map ▼
+	local _newValue_2 = table.create(#_newValue_1)
+	local _callback_2 = function(node)
+		return shapeNode(node, mode)
+	end
+	for _k, _v in _newValue_1 do
+		_newValue_2[_k] = _callback_2(_v, _k - 1, _newValue_1)
+	end
+	-- ▲ ReadonlyArray.map ▲
+	local scripts = _newValue_2
+	return {
+		placeId = game.PlaceId,
+		placeName = game.Name,
+		version = version,
+		mode = mode,
+		count = #scripts,
+		scripts = scripts,
+	}
+end
+local function refreshStructureMap(_requestData)
+	rebuild()
+	ensureScriptHashes()
+	local _object = {
+		success = true,
+	}
+	for _k, _v in getStructureMapSummary() do
+		_object[_k] = _v
+	end
+	return _object
+end
+local function init()
+	if initialized then
+		return nil
+	end
+	initialized = true
+	descendantAddedConnection = game.DescendantAdded:Connect(function(instance)
+		watchNode(instance)
+		markDirty("descendant-added")
+	end)
+	descendantRemovingConnection = game.DescendantRemoving:Connect(function(instance)
+		unwatchNode(instance)
+		markDirty("descendant-removing")
+	end)
+	rebuild()
+end
+local function shutdown()
+	local _result = descendantAddedConnection
+	if _result ~= nil then
+		_result:Disconnect()
+	end
+	local _result_1 = descendantRemovingConnection
+	if _result_1 ~= nil then
+		_result_1:Disconnect()
+	end
+	descendantAddedConnection = nil
+	descendantRemovingConnection = nil
+	for instance in watchedNodes do
+		unwatchNode(instance)
+	end
+	initialized = false
+	dirty = true
+end
+return {
+	init = init,
+	shutdown = shutdown,
+	markDirty = markDirty,
+	getStructureMapSummary = getStructureMapSummary,
+	queryStructureMap = queryStructureMap,
+	getScriptInventory = getScriptInventory,
+	refreshStructureMap = refreshStructureMap,
+}
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">UI</string>
           <string name="Source"><![CDATA[-- Compiled with roblox-ts v3.0.0
@@ -3650,7 +4131,7 @@ local function init(pluginRef)
 	urlInput.Size = UDim2.new(1, 0, 0, 26)
 	urlInput.BackgroundColor3 = C.bg
 	urlInput.BorderSizePixel = 0
-	urlInput.Text = "http://localhost:58741"
+	urlInput.Text = "http://localhost:3002"
 	urlInput.TextColor3 = C.label
 	urlInput.TextSize = 11
 	urlInput.Font = Enum.Font.GothamMedium
@@ -3888,7 +4369,7 @@ return {
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">Utils</string>
           <string name="Source"><![CDATA[-- Compiled with roblox-ts v3.0.0
@@ -4422,11 +4903,11 @@ return {
         </Properties>
       </Item>
     </Item>
-    <Item class="Folder" referent="16">
+    <Item class="Folder" referent="17">
       <Properties>
         <string name="Name">include</string>
       </Properties>
-      <Item class="ModuleScript" referent="13">
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">Promise</string>
           <string name="Source"><![CDATA[--[[
@@ -6500,7 +6981,7 @@ return Promise
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="14">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">RuntimeLib</string>
           <string name="Source"><![CDATA[local Promise = require(script.Parent.Promise)
@@ -6767,15 +7248,15 @@ return TS
         </Properties>
       </Item>
     </Item>
-    <Item class="Folder" referent="17">
+    <Item class="Folder" referent="18">
       <Properties>
         <string name="Name">node_modules</string>
       </Properties>
-      <Item class="Folder" referent="18">
+      <Item class="Folder" referent="19">
         <Properties>
           <string name="Name">@rbxts</string>
         </Properties>
-      <Item class="ModuleScript" referent="15">
+      <Item class="ModuleScript" referent="16">
         <Properties>
           <string name="Name">services</string>
           <string name="Source"><![CDATA[return setmetatable({}, {

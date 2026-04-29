@@ -186,7 +186,6 @@ describe('HTTP Server', () => {
 
   describe('Response Handling', () => {
     test('should handle successful response', async () => {
-      const requestId = 'test-request-id';
       const responseData = { result: 'success' };
 
       const requestPromise = bridge.sendRequest('/api/test', {});
@@ -268,6 +267,81 @@ describe('HTTP Server', () => {
       expect(response.body.uptime).toBeGreaterThan(0);
       expect(response.body.bridge).toBeTruthy();
       expect(response.body.bridge.totalRequests).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('Structure Map Endpoints', () => {
+    test('should expose structure map summary endpoint', async () => {
+      (tools as any).getStructureMapSummary = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }]
+      });
+
+      const response = await request(app)
+        .post('/mcp/get_structure_map_summary')
+        .send({})
+        .expect(200);
+
+      expect(response.body.content?.[0]?.type).toBe('text');
+      expect((tools as any).getStructureMapSummary).toHaveBeenCalled();
+    });
+
+    test('should expose structure map query endpoint', async () => {
+      (tools as any).queryStructureMap = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }]
+      });
+
+      const response = await request(app)
+        .post('/mcp/query_structure_map')
+        .send({ filters: { pathPrefix: 'game.ServerScriptService' }, mode: 'compact' })
+        .expect(200);
+
+      expect(response.body.content?.[0]?.type).toBe('text');
+      expect((tools as any).queryStructureMap).toHaveBeenCalledWith(
+        { pathPrefix: 'game.ServerScriptService' },
+        'compact'
+      );
+    });
+
+    test('should expose script inventory endpoint', async () => {
+      (tools as any).getScriptInventory = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }]
+      });
+
+      const response = await request(app)
+        .post('/mcp/get_script_inventory')
+        .send({ mode: 'compact' })
+        .expect(200);
+
+      expect(response.body.content?.[0]?.type).toBe('text');
+      expect((tools as any).getScriptInventory).toHaveBeenCalledWith('compact');
+    });
+
+    test('should expose cached script explanation endpoint', async () => {
+      (tools as any).explainScriptCached = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }]
+      });
+
+      const response = await request(app)
+        .post('/mcp/explain_script_cached')
+        .send({ instancePath: 'game.ServerScriptService.Main' })
+        .expect(200);
+
+      expect(response.body.content?.[0]?.type).toBe('text');
+      expect((tools as any).explainScriptCached).toHaveBeenCalledWith('game.ServerScriptService.Main');
+    });
+
+    test('should expose subsystem summary endpoint', async () => {
+      (tools as any).getSubsystemSummary = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ ok: true }) }]
+      });
+
+      const response = await request(app)
+        .post('/mcp/get_subsystem_summary')
+        .send({ subsystem: 'AI' })
+        .expect(200);
+
+      expect(response.body.content?.[0]?.type).toBe('text');
+      expect((tools as any).getSubsystemSummary).toHaveBeenCalledWith('AI');
     });
   });
 });

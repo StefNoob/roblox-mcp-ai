@@ -4,6 +4,19 @@ import { createHash } from 'crypto';
 import { gunzipSync } from 'zlib';
 import { readFile, readdir } from 'fs/promises';
 import path from 'path';
+import {
+  type PersistedStructureMapSnapshot,
+  type ScriptSummaryRecord,
+  type StructureMapMode,
+  type StructureMapNodeRecord,
+  StructureMapCache,
+  mergeSummaryIntoSnapshot,
+} from './structure-map-cache.js';
+import { summarizeScriptSource } from './script-summary.js';
+import {
+  analyzeArchitectureSnapshot,
+  analyzeScriptQuality,
+} from './analysis-tools.js';
 
 type ScriptEditReplaceOperation = {
   op: 'replace';
@@ -65,6 +78,15 @@ type ScriptUploadSession = {
   createdAt: number;
   updatedAt: number;
 };
+type StructureMapQueryFilters = {
+  pathPrefix?: string;
+  className?: string;
+  hasSource?: boolean;
+  scriptType?: string;
+  subsystem?: string;
+  nameQuery?: string;
+  limit?: number;
+};
 
 export class RobloxStudioTools {
   private client: StudioHttpClient;
@@ -82,9 +104,11 @@ export class RobloxStudioTools {
   private scriptUploads: Map<string, ScriptUploadSession> = new Map();
   private scriptUploadSeq = 0;
   private readonly maxScriptUploads = 64;
+  private structureMapCache: StructureMapCache;
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
+    this.structureMapCache = new StructureMapCache(process.cwd());
   }
 
   private hashSource(source: string) {
@@ -450,6 +474,207 @@ export class RobloxStudioTools {
     }
   }
 
+  private async fetchPlaceInfoRaw() {
+    return this.client.request('/api/place-info', {});
+  }
+
+  private normalizeStructureNode(node: any): StructureMapNodeRecord {
+    return {
+      path: String(node.path),
+      name: typeof node.name === 'string' ? node.name : String(node.path).split('.').at(-1),
+      className: String(node.className),
+      parentPath: typeof node.parentPath === 'string' ? node.parentPath : undefined,
+      childPaths: Array.isArray(node.childPaths) ? node.childPaths : undefined,
+      childCount: typeof node.childCount === 'number' ? node.childCount : undefined,
+      hasChildren: typeof node.hasChildren === 'boolean' ? node.hasChildren : undefined,
+      hasSource: typeof node.hasSource === 'boolean' ? node.hasSource : undefined,
+      scriptType: typeof node.scriptType === 'string' ? node.scriptType : undefined,
+      enabled: typeof node.enabled === 'boolean' ? node.enabled : undefined,
+      tags: Array.isArray(node.tags) ? node.tags : undefined,
+      attributeNames: Array.isArray(node.attributeNames) ? node.attributeNames : undefined,
+      sourceHash: typeof node.sourceHash === 'string' ? node.sourceHash : undefined,
+      summaryStatus: node.summaryStatus,
+      subsystem: typeof node.subsystem === 'string' ? node.subsystem : undefined,
+    };
+  }
+
+  private formatStructureNode(node: StructureMapNodeRecord, mode: StructureMapMode = 'compact') {
+    const compact = {
+      path: node.path,
+      name: node.name,
+      className: node.className,
+      hasSource: Boolean(node.hasSource),
+      subsystem: node.subsystem || null,
+    };
+    if (mode === 'compact') {
+      return compact;
+    }
+    const standard = {
+      ...compact,
+      parentPath: node.parentPath || null,
+      childCount: node.childCount ?? 0,
+      scriptType: node.scriptType || null,
+      enabled: node.enabled ?? null,
+      sourceHash: node.sourceHash || null,
+      summaryStatus: node.summaryStatus || null,
+    };
+    if (mode === 'standard') {
+      return standard;
+    }
+    return {
+      ...standard,
+      childPaths: node.childPaths || [],
+      tags: node.tags || [],
+      attributeNames: node.attributeNames || [],
+      hasChildren: node.hasChildren ?? ((node.childCount ?? 0) > 0),
+    };
+  }
+
+  private filterStructureNodes(
+    snapshot: PersistedStructureMapSnapshot,
+    filters: StructureMapQueryFilters = {},
+  ) {
+    const pathPrefix = filters.pathPrefix?.toLowerCase();
+    const className = filters.className?.toLowerCase();
+    const scriptType = filters.scriptType?.toLowerCase();
+    const subsystem = filters.subsystem?.toLowerCase();
+    const nameQuery = filters.nameQuery?.toLowerCase();
+    const limit = filters.limit ?? 250;
+    const matches: StructureMapNodeRecord[] = [];
+    for (const node of Object.values(snapshot.nodesByPath)) {
+      if (pathPrefix && !node.path.toLowerCase().includes(pathPrefix)) continue;
+      if (className && node.className.toLowerCase() !== className) continue;
+      if (filters.hasSource !== undefined && Boolean(node.hasSource) !== filters.hasSource) continue;
+      if (scriptType && (node.scriptType || '').toLowerCase() !== scriptType) continue;
+      if (subsystem && (node.subsystem || '').toLowerCase() !== subsystem) continue;
+      if (nameQuery && !(node.name || '').toLowerCase().includes(nameQuery)) continue;
+      matches.push(node);
+      if (matches.length >= limit) break;
+    }
+    return matches;
+  }
+
+  private async buildScriptSummary(
+    instancePath: string,
+    sourceHash: string,
+  ): Promise<ScriptSummaryRecord> {
+    const sourceResponse = await this.readFullScriptSource(instancePath);
+    const source = this.extractSource(sourceResponse);
+    return summarizeScriptSource({ instancePath, source, sourceHash });
+  }
+
+  private async hydrateScriptSummaries(snapshot: PersistedStructureMapSnapshot) {
+    for (const scriptPath of snapshot.scriptInventory) {
+      const node = snapshot.nodesByPath[scriptPath];
+      if (!node?.sourceHash) {
+        continue;
+      }
+      const summary = snapshot.summaryIndex[scriptPath];
+      if (summary && summary.sourceHash === node.sourceHash) {
+        continue;
+      }
+      snapshot.summaryIndex[scriptPath] = await this.buildScriptSummary(scriptPath, node.sourceHash);
+    }
+    return mergeSummaryIntoSnapshot(snapshot);
+  }
+
+  private async refreshStructureMapSnapshot() {
+    const placeInfo = await this.fetchPlaceInfoRaw();
+    const placeId = Number(placeInfo?.placeId ?? 0);
+    if (!placeId) {
+      throw new Error('Structure map refresh failed: placeId missing from Studio.');
+    }
+
+    const existing = await this.structureMapCache.loadStructureMap(placeId);
+    await this.client.request('/api/refresh-structure-map', {});
+    const summary = await this.client.request('/api/structure-map-summary', {});
+    const query = await this.client.request('/api/query-structure-map', { filters: {}, mode: 'verbose' });
+    const inventory = await this.client.request('/api/script-inventory', { mode: 'verbose' });
+
+    const nodes = Array.isArray(query?.nodes) ? query.nodes : [];
+    const scripts = Array.isArray(inventory?.scripts) ? inventory.scripts : [];
+    const snapshot: PersistedStructureMapSnapshot = {
+      placeId,
+      placeName: String(placeInfo?.placeName ?? summary?.placeName ?? 'Unknown Place'),
+      version: Number(summary?.version ?? Date.now()),
+      updatedAt: Date.now(),
+      roots: Array.isArray(summary?.roots) ? summary.roots : [],
+      nodesByPath: {},
+      scriptInventory: [],
+      summaryIndex: existing?.summaryIndex ?? {},
+    };
+
+    for (const rawNode of nodes) {
+      const node = this.normalizeStructureNode(rawNode);
+      snapshot.nodesByPath[node.path] = node;
+    }
+    for (const rawNode of scripts) {
+      const node = this.normalizeStructureNode(rawNode);
+      snapshot.nodesByPath[node.path] = {
+        ...snapshot.nodesByPath[node.path],
+        ...node,
+      };
+      snapshot.scriptInventory.push(node.path);
+    }
+
+    await this.hydrateScriptSummaries(snapshot);
+    await this.structureMapCache.saveStructureMap(snapshot);
+    return snapshot;
+  }
+
+  private async ensureStructureMapSnapshot(forceRefresh: boolean = false) {
+    const placeInfo = await this.fetchPlaceInfoRaw();
+    const placeId = Number(placeInfo?.placeId ?? 0);
+    if (!placeId) {
+      throw new Error('Structure map unavailable: Studio place information is missing.');
+    }
+    if (!forceRefresh) {
+      const cached = await this.structureMapCache.loadStructureMap(placeId);
+      if (cached) {
+        return cached;
+      }
+    }
+    return this.refreshStructureMapSnapshot();
+  }
+
+  private resolveAnalysisNodes(
+    snapshot: PersistedStructureMapSnapshot,
+    options: {
+      instancePaths?: string[];
+      subsystem?: string;
+      pathPrefix?: string;
+      scriptType?: string;
+      limit?: number;
+    } = {},
+  ) {
+    if (Array.isArray(options.instancePaths) && options.instancePaths.length > 0) {
+      return options.instancePaths
+        .map((instancePath) => snapshot.nodesByPath[instancePath])
+        .filter((node): node is StructureMapNodeRecord => Boolean(node?.hasSource))
+        .slice(0, options.limit ?? 25);
+    }
+
+    return this.filterStructureNodes(snapshot, {
+      subsystem: options.subsystem,
+      pathPrefix: options.pathPrefix,
+      scriptType: options.scriptType,
+      hasSource: true,
+      limit: options.limit ?? 25,
+    });
+  }
+
+  private async getStructureMapRuntime() {
+    const cache = await this.structureMapCache.getCacheStats();
+    return {
+      cache,
+      summaries: {
+        count: cache.summaryCount ?? 0,
+        fresh: cache.freshSummaryCount ?? 0,
+        stale: cache.staleSummaryCount ?? 0,
+      },
+    };
+  }
+
   // File System Tools
   async getFileTree(path: string = '') {
     const response = await this.client.request('/api/file-tree', { path });
@@ -464,7 +689,23 @@ export class RobloxStudioTools {
   }
 
   async searchFiles(query: string, searchType: string = 'name') {
-    const response = await this.client.request('/api/search-files', { query, searchType });
+    let response: any;
+    if (searchType === 'name' || searchType === 'type') {
+      const filters: StructureMapQueryFilters = searchType === 'name'
+        ? { nameQuery: query, limit: 250 }
+        : { className: query, limit: 250 };
+      const snapshot = await this.ensureStructureMapSnapshot();
+      const nodes = this.filterStructureNodes(snapshot, filters).map((node) => ({
+        name: node.name,
+        className: node.className,
+        path: node.path,
+        hasSource: Boolean(node.hasSource),
+        subsystem: node.subsystem || null,
+      }));
+      response = { results: nodes, query, searchType, count: nodes.length, source: 'structure-map-cache' };
+    } else {
+      response = await this.client.request('/api/search-files', { query, searchType });
+    }
     return {
       content: [
         {
@@ -501,11 +742,25 @@ export class RobloxStudioTools {
   }
 
   async searchObjects(query: string, searchType: string = 'name', propertyName?: string) {
-    const response = await this.client.request('/api/search-objects', { 
-      query, 
-      searchType, 
-      propertyName 
-    });
+    let response: any;
+    if (searchType === 'name' || searchType === 'class') {
+      const filters: StructureMapQueryFilters = searchType === 'name'
+        ? { nameQuery: query, limit: 250 }
+        : { className: query, limit: 250 };
+      const snapshot = await this.ensureStructureMapSnapshot();
+      const nodes = this.filterStructureNodes(snapshot, filters).map((node) => ({
+        name: node.name,
+        className: node.className,
+        path: node.path,
+      }));
+      response = { results: nodes, query, searchType, count: nodes.length, source: 'structure-map-cache' };
+    } else {
+      response = await this.client.request('/api/search-objects', { 
+        query, 
+        searchType, 
+        propertyName 
+      });
+    }
     return {
       content: [
         {
@@ -517,11 +772,11 @@ export class RobloxStudioTools {
   }
 
   // Property & Instance Tools
-  async getInstanceProperties(instancePath: string) {
+  async getInstanceProperties(instancePath: string, includeSource: boolean = false) {
     if (!instancePath) {
       throw new Error('Instance path is required for get_instance_properties');
     }
-    const response = await this.client.request('/api/instance-properties', { instancePath });
+    const response = await this.client.request('/api/instance-properties', { instancePath, includeSource });
     return {
       content: [
         {
@@ -582,11 +837,32 @@ export class RobloxStudioTools {
 
   // Project Tools
   async getProjectStructure(path?: string, maxDepth?: number, scriptsOnly?: boolean) {
-    const response = await this.client.request('/api/project-structure', { 
-      path, 
-      maxDepth, 
-      scriptsOnly 
-    });
+    let response: any;
+    if (!path) {
+      const snapshot = await this.ensureStructureMapSnapshot();
+      const roots = snapshot.roots
+        .map((rootPath) => snapshot.nodesByPath[rootPath])
+        .filter(Boolean)
+        .map((node) => ({
+          name: node.name,
+          className: node.className,
+          path: node.path,
+          childCount: node.childCount ?? 0,
+          hasChildren: node.hasChildren ?? ((node.childCount ?? 0) > 0),
+        }));
+      response = {
+        type: 'service_overview',
+        services: roots,
+        timestamp: Date.now() / 1000,
+        note: 'Structure map cache overview',
+      };
+    } else {
+      response = await this.client.request('/api/project-structure', { 
+        path, 
+        maxDepth, 
+        scriptsOnly 
+      });
+    }
     return {
       content: [
         {
@@ -875,6 +1151,297 @@ export class RobloxStudioTools {
     };
   }
 
+  async getStructureMapSummary() {
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const cache = await this.structureMapCache.getCacheStats(snapshot.placeId);
+    const payload = {
+      placeId: snapshot.placeId,
+      placeName: snapshot.placeName,
+      version: snapshot.version,
+      updatedAt: snapshot.updatedAt,
+      rootCount: snapshot.roots.length,
+      nodeCount: Object.keys(snapshot.nodesByPath).length,
+      scriptCount: snapshot.scriptInventory.length,
+      roots: snapshot.roots,
+      cache,
+    };
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(payload, null, 2),
+        }
+      ]
+    };
+  }
+
+  async queryStructureMap(filters: StructureMapQueryFilters = {}, mode: StructureMapMode = 'compact') {
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const nodes = this.filterStructureNodes(snapshot, filters).map((node) => this.formatStructureNode(node, mode));
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            version: snapshot.version,
+            mode,
+            count: nodes.length,
+            nodes,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async refreshStructureMap() {
+    const snapshot = await this.refreshStructureMapSnapshot();
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            version: snapshot.version,
+            updatedAt: snapshot.updatedAt,
+            nodeCount: Object.keys(snapshot.nodesByPath).length,
+            scriptCount: snapshot.scriptInventory.length,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async getScriptInventory(mode: StructureMapMode = 'compact') {
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const scripts = snapshot.scriptInventory.map((scriptPath) => {
+      const node = snapshot.nodesByPath[scriptPath];
+      const summary = snapshot.summaryIndex[scriptPath];
+      return {
+        ...this.formatStructureNode(node, mode),
+        summaryShort: summary?.summaryShort || null,
+        summaryLong: mode === 'verbose' ? (summary?.summaryLong || null) : undefined,
+        dependencies: mode === 'compact' ? undefined : (summary?.dependencies || []),
+        servicesUsed: mode === 'compact' ? undefined : (summary?.servicesUsed || []),
+        sideEffects: mode === 'verbose' ? (summary?.sideEffects || []) : undefined,
+      };
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            version: snapshot.version,
+            mode,
+            count: scripts.length,
+            scripts,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async explainScriptCached(instancePath: string) {
+    if (!instancePath) {
+      throw new Error('Instance path is required for explain_script_cached');
+    }
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const node = snapshot.nodesByPath[instancePath];
+    if (!node || !node.hasSource) {
+      throw new Error(`Script not found in structure map: ${instancePath}`);
+    }
+    const currentHash = node.sourceHash || '';
+    let summary = snapshot.summaryIndex[instancePath];
+    if (!summary || summary.sourceHash !== currentHash) {
+      summary = await this.buildScriptSummary(instancePath, currentHash);
+      snapshot.summaryIndex[instancePath] = summary;
+      snapshot.nodesByPath[instancePath].summaryStatus = 'fresh';
+      await this.structureMapCache.saveStructureMap(snapshot);
+    }
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            node: this.formatStructureNode(snapshot.nodesByPath[instancePath], 'verbose'),
+            summary,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async getSubsystemSummary(subsystem: string) {
+    if (!subsystem) {
+      throw new Error('Subsystem is required for get_subsystem_summary');
+    }
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const nodes = this.filterStructureNodes(snapshot, { subsystem, limit: 500 });
+    const scripts = nodes.filter((node) => node.hasSource);
+    const summaries = scripts.map((node) => snapshot.summaryIndex[node.path]).filter(Boolean);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            subsystem,
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            nodeCount: nodes.length,
+            scriptCount: scripts.length,
+            scripts: scripts.map((node) => ({
+              path: node.path,
+              className: node.className,
+              summaryShort: snapshot.summaryIndex[node.path]?.summaryShort || null,
+            })),
+            servicesUsed: [...new Set(summaries.flatMap((summary) => summary.servicesUsed || []))],
+            dependencies: [...new Set(summaries.flatMap((summary) => summary.dependencies || []))],
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async analyzeProjectArchitecture(options: {
+    subsystem?: string;
+    pathPrefix?: string;
+    scriptType?: string;
+    limit?: number;
+    includeDependencies?: boolean;
+  } = {}) {
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const nodeLimit = options.limit ?? 25;
+    const candidateNodes = this.resolveAnalysisNodes(snapshot, {
+      subsystem: options.subsystem,
+      pathPrefix: options.pathPrefix,
+      scriptType: options.scriptType,
+      limit: nodeLimit,
+    });
+
+    const scopedSnapshot: PersistedStructureMapSnapshot = {
+      ...snapshot,
+      nodesByPath: Object.fromEntries(candidateNodes.map((node) => [node.path, snapshot.nodesByPath[node.path]])),
+      scriptInventory: candidateNodes.map((node) => node.path),
+      summaryIndex: Object.fromEntries(
+        candidateNodes
+          .map((node) => [node.path, snapshot.summaryIndex[node.path]])
+          .filter((entry): entry is [string, ScriptSummaryRecord] => Boolean(entry[1])),
+      ),
+    };
+
+    const report = analyzeArchitectureSnapshot(scopedSnapshot, {
+      subsystem: options.subsystem,
+      pathPrefix: options.pathPrefix,
+      scriptType: options.scriptType,
+      limit: nodeLimit,
+      includeDependencies: options.includeDependencies ?? false,
+    });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            ...report,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
+  async analyzeCodeQuality(options: {
+    instancePaths?: string[];
+    subsystem?: string;
+    pathPrefix?: string;
+    limit?: number;
+    includeSourceHints?: boolean;
+  } = {}) {
+    const snapshot = await this.ensureStructureMapSnapshot();
+    const nodes = this.resolveAnalysisNodes(snapshot, {
+      instancePaths: options.instancePaths,
+      subsystem: options.subsystem,
+      pathPrefix: options.pathPrefix,
+      limit: options.limit ?? 10,
+    });
+
+    const scripts = [];
+    for (const node of nodes) {
+      const currentHash = node.sourceHash || '';
+      const sourceResponse = await this.readFullScriptSource(node.path);
+      const source = this.extractSource(sourceResponse);
+      const summary = snapshot.summaryIndex[node.path] && snapshot.summaryIndex[node.path].sourceHash === currentHash
+        ? snapshot.summaryIndex[node.path]
+        : summarizeScriptSource({ instancePath: node.path, source, sourceHash: currentHash });
+      const report = analyzeScriptQuality({
+        path: node.path,
+        className: node.className,
+        scriptType: node.scriptType,
+        subsystem: node.subsystem || summary.subsystem,
+        summaryShort: summary.summaryShort,
+        source,
+        dependencies: summary.dependencies || [],
+        servicesUsed: summary.servicesUsed || [],
+        sideEffects: summary.sideEffects || [],
+      });
+      scripts.push(report);
+    }
+
+    const findings = scripts
+      .flatMap((script) => script.findings)
+      .map((finding) => (
+        options.includeSourceHints
+          ? finding
+          : { ...finding, evidence: undefined }
+      ));
+    const severityCount = {
+      high: findings.filter((finding) => finding.severity === 'high').length,
+      medium: findings.filter((finding) => finding.severity === 'medium').length,
+      low: findings.filter((finding) => finding.severity === 'low').length,
+    };
+    const averageScore = scripts.length > 0
+      ? Math.round(scripts.reduce((sum, script) => sum + script.score, 0) / scripts.length)
+      : 0;
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            placeId: snapshot.placeId,
+            placeName: snapshot.placeName,
+            filters: {
+              instancePaths: options.instancePaths || [],
+              subsystem: options.subsystem || null,
+              pathPrefix: options.pathPrefix || null,
+              limit: options.limit ?? 10,
+              includeSourceHints: options.includeSourceHints ?? false,
+            },
+            summary: {
+              scriptCount: scripts.length,
+              averageScore,
+              totalFindings: findings.length,
+              severities: severityCount,
+            },
+            scripts: scripts.map((script) => ({
+              ...script,
+              findings: options.includeSourceHints
+                ? script.findings
+                : script.findings.map((finding) => ({ ...finding, evidence: undefined })),
+            })),
+            findings,
+          }, null, 2),
+        }
+      ]
+    };
+  }
+
   async beginScriptSourceUpload(
     instancePath: string,
     expectedHash?: string,
@@ -996,6 +1563,7 @@ export class RobloxStudioTools {
   }
 
   async getRuntimeState() {
+    const structureMap = await this.getStructureMapRuntime();
     return {
       content: [
         {
@@ -1003,6 +1571,7 @@ export class RobloxStudioTools {
           text: JSON.stringify({
             writeQueue: this.getWriteQueueStats(),
             fastEndpointSupport: this.fastEndpointSupport,
+            structureMap,
             snapshots: {
               count: this.scriptSnapshots.size,
               max: this.maxSnapshots,
@@ -1014,6 +1583,7 @@ export class RobloxStudioTools {
   }
 
   async getDiagnostics() {
+    const structureMap = await this.getStructureMapRuntime();
     return {
       content: [
         {
@@ -1022,6 +1592,7 @@ export class RobloxStudioTools {
             runtime: {
               writeQueue: this.getWriteQueueStats(),
               fastEndpointSupport: this.fastEndpointSupport,
+              structureMap,
             },
             snapshots: {
               count: this.scriptSnapshots.size,

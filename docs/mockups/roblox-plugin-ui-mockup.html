@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Roblox MCP Plugin Mockup</title>
+  <style>
+    :root {
+      --bg: #08111f;
+      --bg2: #0d1b31;
+      --panel: rgba(10, 18, 34, 0.82);
+      --panel-strong: rgba(14, 25, 47, 0.96);
+      --line: rgba(142, 175, 255, 0.14);
+      --line-strong: rgba(142, 175, 255, 0.26);
+      --text: #edf4ff;
+      --muted: #91a4c4;
+      --accent: #74f7d5;
+      --accent2: #7aa9ff;
+      --warning: #ffbf69;
+      --danger: #ff6b88;
+      --ok: #55e6a5;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(116, 247, 213, 0.16), transparent 26%),
+        radial-gradient(circle at 85% 15%, rgba(122, 169, 255, 0.2), transparent 24%),
+        linear-gradient(145deg, var(--bg), var(--bg2) 58%, #071426);
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+      background-size: 24px 24px;
+      mask-image: radial-gradient(circle at center, black, transparent 85%);
+      pointer-events: none;
+    }
+
+    .shell {
+      width: min(1420px, calc(100vw - 48px));
+      margin: 32px auto;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 32px;
+      background: rgba(5, 10, 22, 0.66);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(24px);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.3fr 0.7fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(12, 21, 40, 0.92), rgba(7, 15, 28, 0.9));
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      padding: 22px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .panel::after {
+      content: "";
+      position: absolute;
+      inset: auto -20% -45% 40%;
+      height: 140px;
+      background: radial-gradient(circle, rgba(116, 247, 213, 0.18), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 11px;
+    }
+
+    .hero h1 {
+      margin: 16px 0 10px;
+      font-size: clamp(34px, 5vw, 58px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 700px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 15px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .stat {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 28px;
+      margin-bottom: 6px;
+      letter-spacing: -0.05em;
+    }
+
+    .stat span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .hero-side {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .mini-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .mini-card {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .mini-card .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .mini-card .value {
+      margin-top: 8px;
+      font-size: 26px;
+      letter-spacing: -0.05em;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr) 340px;
+      gap: 18px;
+      min-height: 760px;
+    }
+
+    .rail {
+      background: linear-gradient(180deg, rgba(10, 17, 32, 0.96), rgba(6, 12, 23, 0.96));
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      padding: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    .brand-mark {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-mark .icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--accent2), var(--accent));
+      box-shadow: 0 10px 24px rgba(116, 247, 213, 0.24);
+    }
+
+    .brand small,
+    .section-head p,
+    .subtle {
+      color: var(--muted);
+    }
+
+    .nav,
+    .quick-grid,
+    .insight-list,
+    .step-list,
+    .artifact-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .nav-item,
+    .quick-action,
+    .artifact,
+    .insight,
+    .step {
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid transparent;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .nav-item.active {
+      background: linear-gradient(180deg, rgba(122, 169, 255, 0.18), rgba(116, 247, 213, 0.08));
+      border-color: rgba(122, 169, 255, 0.32);
+    }
+
+    .nav-title,
+    .row-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      font-weight: 600;
+    }
+
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .pill.ok { color: var(--ok); }
+    .pill.warn { color: var(--warning); }
+    .pill.live { color: var(--accent); }
+
+    .main {
+      display: grid;
+      gap: 18px;
+    }
+
+    .overview {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .section-head h2,
+    .section-head h3,
+    .panel h3 {
+      margin: 0;
+      letter-spacing: -0.03em;
+    }
+
+    .live-card {
+      padding: 18px;
+      border-radius: 22px;
+      background:
+        radial-gradient(circle at top right, rgba(116, 247, 213, 0.12), transparent 35%),
+        rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(116, 247, 213, 0.16);
+    }
+
+    .live-top,
+    .step-top,
+    .quick-top,
+    .artifact-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+    }
+
+    .large {
+      font-size: 34px;
+      letter-spacing: -0.05em;
+      margin: 8px 0;
+    }
+
+    .status-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .status-box {
+      padding: 12px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .status-box strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 14px;
+      padding-left: 18px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: linear-gradient(var(--accent2), rgba(255,255,255,0.08));
+    }
+
+    .step {
+      position: relative;
+      padding-left: 18px;
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.04);
+    }
+
+    .step::before {
+      content: "";
+      position: absolute;
+      left: -17px;
+      top: 18px;
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--accent2);
+      box-shadow: 0 0 0 4px rgba(122, 169, 255, 0.15);
+    }
+
+    .step.active::before {
+      background: var(--accent);
+      box-shadow: 0 0 0 6px rgba(116, 247, 213, 0.18);
+    }
+
+    .step.warn::before {
+      background: var(--warning);
+      box-shadow: 0 0 0 6px rgba(255, 191, 105, 0.14);
+    }
+
+    .step p,
+    .quick-action p,
+    .artifact p,
+    .insight p,
+    .nav-item p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .quick-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .quick-action {
+      min-height: 128px;
+      border-color: rgba(255, 255, 255, 0.06);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+    }
+
+    .quick-action.primary {
+      border-color: rgba(116, 247, 213, 0.22);
+      background: linear-gradient(180deg, rgba(116, 247, 213, 0.12), rgba(122, 169, 255, 0.04));
+    }
+
+    .quick-action .cta {
+      display: inline-flex;
+      margin-top: 12px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .console {
+      padding: 16px;
+      border-radius: 18px;
+      background: #07101d;
+      border: 1px solid rgba(122, 169, 255, 0.16);
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.65;
+      color: #bed4ff;
+      white-space: pre-wrap;
+    }
+
+    .sidebar-section + .sidebar-section,
+    .panel + .panel {
+      margin-top: 16px;
+    }
+
+    .right {
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+
+    .agent-face {
+      height: 190px;
+      border-radius: 22px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background:
+        radial-gradient(circle at 50% 35%, rgba(116, 247, 213, 0.16), transparent 30%),
+        radial-gradient(circle at 30% 70%, rgba(122, 169, 255, 0.16), transparent 28%),
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+      position: relative;
+      overflow: hidden;
+    }
+
+    .agent-face::before,
+    .agent-face::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(116,247,213,0.68));
+      box-shadow: 0 0 36px rgba(116,247,213,0.24);
+    }
+
+    .agent-face::before {
+      width: 72px;
+      height: 72px;
+      left: 36px;
+      top: 54px;
+    }
+
+    .agent-face::after {
+      width: 126px;
+      height: 126px;
+      right: 18px;
+      top: 22px;
+      opacity: 0.45;
+    }
+
+    .agent-summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .agent-summary strong {
+      display: block;
+      font-size: 20px;
+      margin-top: 4px;
+    }
+
+    .note {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 191, 105, 0.07);
+      border: 1px solid rgba(255, 191, 105, 0.18);
+      color: #ffd8ab;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .footer-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 18px;
+      padding: 14px 18px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    @media (max-width: 1180px) {
+      .hero,
+      .overview,
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .shell {
+        width: min(100vw - 20px, 1420px);
+        margin: 10px auto;
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="panel">
+        <span class="eyebrow">Roblox MCP Plugin / Vision Mockup</span>
+        <h1>Show the AI working, not just whether it is connected.</h1>
+        <p>
+          This concept turns the plugin into a live cockpit: every AI step is narrated, grouped by phase,
+          linked to artifacts, and paired with one-click actions such as retry, inspect, sync, diff, and run.
+        </p>
+        <div class="stats">
+          <div class="stat">
+            <strong>3 views</strong>
+            <span>Overview, Activity, Actions</span>
+          </div>
+          <div class="stat">
+            <strong>1 timeline</strong>
+            <span>Every agent step, in order</span>
+          </div>
+          <div class="stat">
+            <strong>8 quick actions</strong>
+            <span>Contextual and safe-by-default</span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-side">
+        <div class="panel mini-stack">
+          <div class="mini-card">
+            <div class="label">Primary Goal</div>
+            <div class="value">Immediate legibility</div>
+          </div>
+          <div class="mini-card">
+            <div class="label">Visual Direction</div>
+            <div class="value">Sci-fi control room</div>
+          </div>
+          <div class="mini-card">
+            <div class="label">Risk Reduced</div>
+            <div class="value">No more black-box AI</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="rail">
+        <div class="brand">
+          <div class="brand-mark">
+            <div class="icon"></div>
+            <div>
+              <div><strong>Agent Cockpit</strong></div>
+              <small>Studio plugin concept</small>
+            </div>
+          </div>
+          <span class="pill live">Live</span>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-head">
+            <h3>Views</h3>
+          </div>
+          <div class="nav">
+            <div class="nav-item active">
+              <div class="nav-title"><span>Overview</span><span class="pill ok">Default</span></div>
+              <p>Connection health, active task, last decisions and suggested next moves.</p>
+            </div>
+            <div class="nav-item">
+              <div class="nav-title"><span>Activity Feed</span><span class="pill">26 events</span></div>
+              <p>Readable log with AI thoughts summarized into user-facing operational steps.</p>
+            </div>
+            <div class="nav-item">
+              <div class="nav-title"><span>Quick Actions</span><span class="pill">8 ready</span></div>
+              <p>One-click commands surfaced only when they make sense in current context.</p>
+            </div>
+            <div class="nav-item">
+              <div class="nav-title"><span>Artifacts</span><span class="pill">4 changed</span></div>
+              <p>Scripts, instances, selection, diffs, console output and playtest assets.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-head">
+            <h3>Server Tabs</h3>
+            <span class="pill">Multi-port</span>
+          </div>
+          <div class="nav">
+            <div class="nav-item active">
+              <div class="nav-title"><span>localhost:3002</span><span class="pill ok">Connected</span></div>
+              <p>Main MCP bridge used by current agent session.</p>
+            </div>
+            <div class="nav-item">
+              <div class="nav-title"><span>localhost:3004</span><span class="pill warn">Waiting</span></div>
+              <p>Secondary sandbox target with stale heartbeat.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-head">
+            <h3>Insights</h3>
+          </div>
+          <div class="insight-list">
+            <div class="insight">
+              <div class="row-title"><span>Why this matters</span></div>
+              <p>The current plugin shows transport status, but not AI intention, decision path or local impact.</p>
+            </div>
+            <div class="insight">
+              <div class="row-title"><span>UX principle</span></div>
+              <p>Translate machine events into plain language: “searched scripts”, “patched line 48”, “ran playtest”.</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="overview">
+          <div class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Mission Status</h2>
+                <p>What the AI is doing now, why, and what it will do next.</p>
+              </div>
+              <span class="pill ok">Agent Active</span>
+            </div>
+
+            <div class="live-card">
+              <div class="live-top">
+                <div>
+                  <div class="subtle">Current task</div>
+                  <div class="large">Refactoring `CombatController` hot path</div>
+                  <div class="subtle">The agent is mapping dependencies before editing shared logic.</div>
+                </div>
+                <div class="pill live">Step 3 of 6</div>
+              </div>
+
+              <div class="status-row">
+                <div class="status-box">
+                  <strong>HTTP Bridge</strong>
+                  <span class="subtle">Stable heartbeat, 128ms avg.</span>
+                </div>
+                <div class="status-box">
+                  <strong>Studio Context</strong>
+                  <span class="subtle">Place: `arena-alpha`, selection locked.</span>
+                </div>
+                <div class="status-box">
+                  <strong>Agent Mode</strong>
+                  <span class="subtle">Explore before patching.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-top:16px; padding:18px;">
+              <div class="section-head">
+                <div>
+                  <h3>Readable Console</h3>
+                  <p>Technical stream compressed into human language plus the raw trace.</p>
+                </div>
+                <span class="pill">Dual mode</span>
+              </div>
+              <div class="console">09:41:12  AI searched: "damage", "cooldown", "hitbox"
+09:41:14  Found 3 relevant scripts, prioritized CombatController.server.luau
+09:41:17  Read lines 88-166 to inspect attack debounce logic
+09:41:20  Suggested next action: diff current version before patching
+09:41:21  Quick Action unlocked: "Open diff" and "Run isolated playtest"</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Quick Actions</h2>
+                <p>Actions become available when the agent reaches a useful checkpoint.</p>
+              </div>
+            </div>
+
+            <div class="quick-grid">
+              <div class="quick-action primary">
+                <div class="quick-top">
+                  <strong>Open Diff</strong>
+                  <span class="pill ok">Ready</span>
+                </div>
+                <p>Show exactly what the agent changed before accepting or applying a follow-up patch.</p>
+                <span class="cta">Inspect changes</span>
+              </div>
+
+              <div class="quick-action">
+                <div class="quick-top">
+                  <strong>Retry Last Step</strong>
+                  <span class="pill warn">Safe</span>
+                </div>
+                <p>Re-run the last query or sync operation with the same input and target.</p>
+                <span class="cta">Replay</span>
+              </div>
+
+              <div class="quick-action">
+                <div class="quick-top">
+                  <strong>Run Playtest</strong>
+                  <span class="pill">Contextual</span>
+                </div>
+                <p>Start a targeted playtest from the current branch of work, not a full reset.</p>
+                <span class="cta">Launch</span>
+              </div>
+
+              <div class="quick-action">
+                <div class="quick-top">
+                  <strong>Reveal Script</strong>
+                  <span class="pill">Source</span>
+                </div>
+                <p>Jump directly to the script, object, or selection the agent is talking about.</p>
+                <span class="cta">Focus in Studio</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="section-head">
+            <div>
+              <h2>AI Step Timeline</h2>
+              <p>Each action is explicit: search, read, decide, patch, verify, report.</p>
+            </div>
+            <span class="pill">Narrated execution</span>
+          </div>
+
+          <div class="timeline">
+            <div class="step">
+              <div class="step-top">
+                <strong>1. Connected to Studio and resolved active place</strong>
+                <span class="pill ok">Done</span>
+              </div>
+              <p>Agent validated the MCP heartbeat, resolved the active place, and loaded the cached structure map.</p>
+            </div>
+
+            <div class="step">
+              <div class="step-top">
+                <strong>2. Searched likely combat scripts</strong>
+                <span class="pill ok">Done</span>
+              </div>
+              <p>Instead of opening everything, the agent narrowed the codebase by keywords and touched only three scripts.</p>
+            </div>
+
+            <div class="step active">
+              <div class="step-top">
+                <strong>3. Reading debounce branch before edit</strong>
+                <span class="pill live">In progress</span>
+              </div>
+              <p>The plugin explains the exact line range being analyzed and why that region matters to the bug or feature.</p>
+              <div class="tag-row">
+                <span class="pill">File: CombatController.server.luau</span>
+                <span class="pill">Lines: 88-166</span>
+                <span class="pill">Reason: repeated hit registration</span>
+              </div>
+            </div>
+
+            <div class="step">
+              <div class="step-top">
+                <strong>4. Draft patch and preview diff</strong>
+                <span class="pill">Queued</span>
+              </div>
+              <p>Before writing, the plugin surfaces the intent in plain language and offers a diff preview.</p>
+            </div>
+
+            <div class="step warn">
+              <div class="step-top">
+                <strong>5. Verification gate</strong>
+                <span class="pill warn">Needs output</span>
+              </div>
+              <p>No “done” state unless the run includes a concrete verification result such as playtest, command output, or state check.</p>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <aside class="right">
+        <div class="panel">
+          <div class="section-head">
+            <div>
+              <h3>Agent Presence</h3>
+              <p>A visual anchor so the panel feels active, not purely administrative.</p>
+            </div>
+          </div>
+          <div class="agent-face"></div>
+          <div class="agent-summary">
+            <div>
+              <span class="subtle">Confidence</span>
+              <strong>0.82</strong>
+            </div>
+            <div>
+              <span class="subtle">Elapsed</span>
+              <strong>01:28</strong>
+            </div>
+            <div>
+              <span class="subtle">Touched</span>
+              <strong>3 files</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="section-head">
+            <div>
+              <h3>Artifacts</h3>
+              <p>Everything the AI inspected or changed is easy to reopen.</p>
+            </div>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact">
+              <div class="artifact-top">
+                <strong>CombatController.server.luau</strong>
+                <span class="pill ok">Viewed</span>
+              </div>
+              <p>Last opened 12s ago. Main target of the active reasoning path.</p>
+            </div>
+            <div class="artifact">
+              <div class="artifact-top">
+                <strong>DamageService.luau</strong>
+                <span class="pill">Linked</span>
+              </div>
+              <p>Dependency detected while tracing the hit registration flow.</p>
+            </div>
+            <div class="artifact">
+              <div class="artifact-top">
+                <strong>Playtest Output</strong>
+                <span class="pill warn">Pending</span>
+              </div>
+              <p>Verification block stays visible until an actual test artifact exists.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="note">
+          The core UI idea is not “more buttons”. It is a progressive disclosure model:
+          first the user sees what the AI is doing, then why, then the relevant actions for that exact step.
+        </div>
+      </aside>
+    </section>
+
+    <div class="footer-bar">
+      <span>Mockup purpose: validate information architecture and visual direction before changing the Roblox plugin.</span>
+      <span>Suggested next step: decide whether the default landing view should be `Overview` or `Activity Feed`.</span>
+    </div>
+  </div>
+</body>
+</html>

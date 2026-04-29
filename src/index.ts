@@ -28,6 +28,7 @@ import { createRequire } from 'module';
 import { createHttpServer } from './http-server.js';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService } from './bridge-service.js';
+import { resolveServerHost } from './server-config.js';
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require('../package.json');
@@ -62,7 +63,7 @@ class RobloxStudioMCPServer {
           // Instance Hierarchy Tools (NOT local filesystem - these operate on Roblox Studio instances)
           {
             name: 'get_file_tree',
-            description: 'Get the Roblox instance hierarchy tree from Roblox Studio. Returns game instances (Parts, Scripts, Models, Folders, etc.) as a tree structure. NOTE: This operates on Roblox Studio instances, NOT local filesystem files.',
+            description: 'Return a Roblox instance tree from Studio, not your local filesystem.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -76,7 +77,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'search_files',
-            description: 'Search for Roblox instances by name, class type, or script content. NOTE: This searches Roblox Studio instances, NOT local filesystem files.',
+            description: 'Search Roblox instances by name, class, or script content.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -113,7 +114,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'get_diagnostics',
-            description: 'Get diagnostics including write queue, fast path support, snapshots, and server/plugin readiness.',
+            description: 'Return MCP/plugin readiness plus write, cache, and snapshot diagnostics.',
             inputSchema: {
               type: 'object',
               properties: {}
@@ -121,7 +122,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'check_script_drift',
-            description: 'Compare local files against Studio script source to detect drift. By default this ignores formatting-only differences such as CRLF vs LF, BOM, trailing whitespace, and trailing final newlines.',
+            description: 'Compare local files with Studio script source and ignore formatting-only drift by default.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -198,13 +199,18 @@ class RobloxStudioMCPServer {
           // Property & Instance Tools
           {
             name: 'get_instance_properties',
-            description: 'Get all properties of a specific Roblox instance in Studio',
+            description: 'Get properties for one Roblox instance. Script Source is excluded unless includeSource=true.',
             inputSchema: {
               type: 'object',
               properties: {
                 instancePath: {
                   type: 'string',
                   description: 'Roblox instance path using dot notation (e.g., "game.Workspace.Part", "game.ServerScriptService.MainScript", "game.ReplicatedStorage.ModuleScript")'
+                },
+                includeSource: {
+                  type: 'boolean',
+                  description: 'When true, include Source for LuaSourceContainer instances. Default is false to keep payloads smaller.',
+                  default: false
                 }
               },
               required: ['instancePath']
@@ -259,7 +265,7 @@ class RobloxStudioMCPServer {
           // Project Tools
           {
             name: 'get_project_structure',
-            description: 'Get complete game hierarchy. IMPORTANT: Use maxDepth parameter (default: 3) to explore deeper levels of the hierarchy. Set higher values like 5-10 for comprehensive exploration',
+            description: 'Browse project hierarchy. Prefer structure-map tools first and expand only the paths you need.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -270,12 +276,159 @@ class RobloxStudioMCPServer {
                 },
                 maxDepth: {
                   type: 'number',
-                  description: 'Maximum depth to traverse (default: 3). RECOMMENDED: Use 5-10 for thorough exploration. Higher values provide more complete structure',
+                  description: 'Maximum depth to traverse. Keep this small unless you need a specific deep branch.',
                   default: 3
                 },
                 scriptsOnly: {
                   type: 'boolean',
                   description: 'Show only scripts and script containers',
+                  default: false
+                }
+              }
+            }
+          },
+          {
+            name: 'get_structure_map_summary',
+            description: 'Get the cached top-level structure summary for map-first discovery.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          },
+          {
+            name: 'query_structure_map',
+            description: 'Query the cached structure map by path, class, subsystem, or name.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                filters: {
+                  type: 'object',
+                  properties: {
+                    pathPrefix: { type: 'string' },
+                    className: { type: 'string' },
+                    hasSource: { type: 'boolean' },
+                    scriptType: { type: 'string' },
+                    subsystem: { type: 'string' },
+                    nameQuery: { type: 'string' },
+                    limit: { type: 'number' }
+                  }
+                },
+                mode: {
+                  type: 'string',
+                  enum: ['compact', 'standard', 'verbose'],
+                  default: 'compact'
+                }
+              }
+            }
+          },
+          {
+            name: 'refresh_structure_map',
+            description: 'Rebuild the structure map from Studio and persist the cache.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          },
+          {
+            name: 'get_script_inventory',
+            description: 'List cached script nodes with compact or verbose summary metadata.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                mode: {
+                  type: 'string',
+                  enum: ['compact', 'standard', 'verbose'],
+                  default: 'compact'
+                }
+              }
+            }
+          },
+          {
+            name: 'explain_script_cached',
+            description: 'Return a cached script summary and refresh it only when the source hash changed.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePath: {
+                  type: 'string',
+                  description: 'Roblox instance path to the script'
+                }
+              },
+              required: ['instancePath']
+            }
+          },
+          {
+            name: 'get_subsystem_summary',
+            description: 'Summarize one subsystem from cached structure and script summaries.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                subsystem: {
+                  type: 'string',
+                  description: 'Subsystem name such as AI, UI, Inventory, Combat, or Tycoon'
+                }
+              },
+              required: ['subsystem']
+            }
+          },
+          {
+            name: 'analyze_project_architecture',
+            description: 'AI-first architecture report built from cached structure-map and script summary data.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                subsystem: {
+                  type: 'string',
+                  description: 'Optional subsystem scope such as AI, UI, Inventory, Combat, or Tycoon'
+                },
+                pathPrefix: {
+                  type: 'string',
+                  description: 'Optional path substring to narrow the report to one branch'
+                },
+                scriptType: {
+                  type: 'string',
+                  description: 'Optional script type filter such as ModuleScript, Script, or LocalScript'
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of scripts to analyze from the cached scope',
+                  default: 25
+                },
+                includeDependencies: {
+                  type: 'boolean',
+                  description: 'Echo dependency context in the architecture report.',
+                  default: false
+                }
+              }
+            }
+          },
+          {
+            name: 'analyze_code_quality',
+            description: 'AI-first code quality report with severity-ranked findings and refactor hints.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePaths: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Optional explicit script paths to analyze'
+                },
+                subsystem: {
+                  type: 'string',
+                  description: 'Optional subsystem scope'
+                },
+                pathPrefix: {
+                  type: 'string',
+                  description: 'Optional path substring scope'
+                },
+                limit: {
+                  type: 'number',
+                  description: 'Maximum number of scripts to read and score',
+                  default: 10
+                },
+                includeSourceHints: {
+                  type: 'boolean',
+                  description: 'When true, include small evidence hints from source-derived findings.',
                   default: false
                 }
               }
@@ -664,7 +817,7 @@ class RobloxStudioMCPServer {
           // Script Management Tools (for Roblox Studio scripts - NOT local files)
           {
             name: 'get_script_source',
-            description: 'Get the source code of a Roblox script (LocalScript, Script, or ModuleScript). Returns both "source" (raw code) and "numberedSource" (with line numbers prefixed like "1: code"). Use numberedSource to accurately identify line numbers for editing. For large scripts (>1500 lines), use startLine/endLine to read specific sections.',
+            description: 'Read Roblox script source. Use line ranges for targeted reads when possible.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -686,7 +839,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'get_script_snapshot',
-            description: 'Get script source plus a deterministic SHA-256 sourceHash for optimistic concurrency control. Use this before batch edits or checked writes.',
+            description: 'Read script source plus a deterministic SHA-256 source hash.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -708,7 +861,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'set_script_source',
-            description: 'Replace the entire source code of a Roblox script. Uses ScriptEditorService:UpdateSourceAsync (works with open editors). For very large files that exceed MCP payload limits, use the chunked script upload tools instead.',
+            description: 'Replace full script source. Use chunked upload tools for very large rewrites.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -730,7 +883,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'begin_script_source_upload',
-            description: 'Start a chunked script upload session for large source files that do not fit in a single MCP tool payload.',
+            description: 'Start a chunked upload session for large script rewrites.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -817,7 +970,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'set_script_source_checked',
-            description: 'Replace script source only if expectedHash matches current script hash. Prevents stale overwrites.',
+            description: 'Replace script source only if expectedHash matches the current script hash.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -839,7 +992,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'set_script_source_fast',
-            description: 'Fast full-source write alias. Uses plugin fast endpoint when available, otherwise safely falls back to the editor-safe set_script_source bridge path.',
+            description: 'Fast full-source write with safe fallback when the fast endpoint is unavailable.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -934,7 +1087,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'apply_and_verify_script_source',
-            description: 'Atomically apply full script source, verify hash/content, and rollback to prewrite snapshot if verification fails. For very large files that exceed MCP payload limits, use begin/append/commit script upload with mode apply_and_verify.',
+            description: 'Apply full script source, verify it, and rollback on failure.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -969,7 +1122,7 @@ class RobloxStudioMCPServer {
           // Partial Script Editing Tools - use "numberedSource" from get_script_source to identify correct line numbers
           {
             name: 'edit_script_lines',
-            description: 'Replace specific lines in a Roblox script without rewriting the entire source. IMPORTANT: Use the "numberedSource" field from get_script_source to identify the correct line numbers. Lines are 1-indexed and ranges are inclusive.',
+            description: 'Replace a line range without rewriting the whole script.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -995,7 +1148,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'insert_script_lines',
-            description: 'Insert new lines into a Roblox script at a specific position. IMPORTANT: Use the "numberedSource" field from get_script_source to identify the correct line numbers.',
+            description: 'Insert lines into a Roblox script at a specific position.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1018,7 +1171,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'delete_script_lines',
-            description: 'Delete specific lines from a Roblox script. IMPORTANT: Use the "numberedSource" field from get_script_source to identify the correct line numbers.',
+            description: 'Delete a line range from a Roblox script.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1040,7 +1193,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'batch_script_edits',
-            description: 'Apply multiple line edits atomically with optional rollback and hash check. Operations are normalized internally to avoid line-shift conflicts.',
+            description: 'Apply multiple line edits atomically with optional rollback and hash checks.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1256,7 +1409,7 @@ class RobloxStudioMCPServer {
           },
           {
             name: 'execute_luau',
-            description: 'Execute arbitrary Luau code in Roblox Studio and return the result. The code runs in the plugin context with access to game, workspace, and all services.',
+            description: 'Execute Luau in the Studio plugin context and return the result.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1335,7 +1488,10 @@ class RobloxStudioMCPServer {
           
           // Property & Instance Tools
           case 'get_instance_properties':
-            return await this.tools.getInstanceProperties((args as any)?.instancePath as string);
+            return await this.tools.getInstanceProperties(
+              (args as any)?.instancePath as string,
+              (args as any)?.includeSource as boolean | undefined
+            );
           case 'get_instance_children':
             return await this.tools.getInstanceChildren((args as any)?.instancePath as string);
           case 'search_by_property':
@@ -1346,6 +1502,34 @@ class RobloxStudioMCPServer {
           // Project Tools
           case 'get_project_structure':
             return await this.tools.getProjectStructure((args as any)?.path, (args as any)?.maxDepth, (args as any)?.scriptsOnly);
+          case 'get_structure_map_summary':
+            return await this.tools.getStructureMapSummary();
+          case 'query_structure_map':
+            return await this.tools.queryStructureMap((args as any)?.filters, (args as any)?.mode);
+          case 'refresh_structure_map':
+            return await this.tools.refreshStructureMap();
+          case 'get_script_inventory':
+            return await this.tools.getScriptInventory((args as any)?.mode);
+          case 'explain_script_cached':
+            return await this.tools.explainScriptCached((args as any)?.instancePath as string);
+          case 'get_subsystem_summary':
+            return await this.tools.getSubsystemSummary((args as any)?.subsystem as string);
+          case 'analyze_project_architecture':
+            return await this.tools.analyzeProjectArchitecture({
+              subsystem: (args as any)?.subsystem as string | undefined,
+              pathPrefix: (args as any)?.pathPrefix as string | undefined,
+              scriptType: (args as any)?.scriptType as string | undefined,
+              limit: (args as any)?.limit as number | undefined,
+              includeDependencies: (args as any)?.includeDependencies as boolean | undefined,
+            });
+          case 'analyze_code_quality':
+            return await this.tools.analyzeCodeQuality({
+              instancePaths: (args as any)?.instancePaths as string[] | undefined,
+              subsystem: (args as any)?.subsystem as string | undefined,
+              pathPrefix: (args as any)?.pathPrefix as string | undefined,
+              limit: (args as any)?.limit as number | undefined,
+              includeSourceHints: (args as any)?.includeSourceHints as boolean | undefined,
+            });
           
           // Property Modification Tools
           case 'set_property':
@@ -1518,7 +1702,7 @@ class RobloxStudioMCPServer {
   async run() {
     const basePort = process.env.ROBLOX_STUDIO_PORT ? parseInt(process.env.ROBLOX_STUDIO_PORT) : 3002;
     const maxPort = basePort + 4;
-    const host = process.env.ROBLOX_STUDIO_HOST || '0.0.0.0';
+    const host = resolveServerHost(process.env.ROBLOX_STUDIO_HOST);
     const httpServer = createHttpServer(this.tools, this.bridge);
     const listenWithFallback = (
       app: ReturnType<typeof createHttpServer>,
@@ -1604,6 +1788,7 @@ class RobloxStudioMCPServer {
       const mcpActive = (httpServer as any).isMCPServerActive();
       
       if (pluginConnected && mcpActive) {
+        return;
       } else if (pluginConnected && !mcpActive) {
         console.error('Studio plugin connected, but MCP server inactive');
       } else if (!pluginConnected && mcpActive) {

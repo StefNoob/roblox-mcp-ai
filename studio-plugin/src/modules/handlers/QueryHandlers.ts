@@ -184,6 +184,7 @@ function searchObjects(requestData: Record<string, unknown>) {
 
 function getInstanceProperties(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
+	const includeSource = (requestData.includeSource as boolean | undefined) === true;
 	if (!instancePath) return { error: "Instance path is required" };
 
 	const instance = getInstanceByPath(instancePath);
@@ -227,11 +228,11 @@ function getInstanceProperties(requestData: Record<string, unknown>) {
 			if (propSuccess) properties[prop] = propValue;
 		}
 
-		if (instance.IsA("LuaSourceContainer")) {
+		if (includeSource && instance.IsA("LuaSourceContainer")) {
 			properties.Source = readScriptSource(instance);
-			if (instance.IsA("BaseScript")) {
-				properties.Enabled = tostring(instance.Enabled);
-			}
+		}
+		if (instance.IsA("BaseScript")) {
+			properties.Enabled = tostring(instance.Enabled);
 		}
 
 		if (instance.IsA("Part")) {

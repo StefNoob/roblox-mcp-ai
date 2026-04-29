@@ -491,7 +491,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
   app.post('/mcp/get_instance_properties', async (req, res) => {
     try {
-      const result = await tools.getInstanceProperties(req.body.instancePath);
+      const result = await tools.getInstanceProperties(req.body.instancePath, req.body.includeSource);
       res.json(result);
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
@@ -573,6 +573,60 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   app.post('/mcp/get_project_structure', async (req, res) => {
     try {
       const result = await tools.getProjectStructure(req.body.path, req.body.maxDepth, req.body.scriptsOnly);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/get_structure_map_summary', async (req, res) => {
+    try {
+      const result = await tools.getStructureMapSummary();
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/query_structure_map', async (req, res) => {
+    try {
+      const result = await tools.queryStructureMap(req.body.filters, req.body.mode);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/refresh_structure_map', async (req, res) => {
+    try {
+      const result = await tools.refreshStructureMap();
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/get_script_inventory', async (req, res) => {
+    try {
+      const result = await tools.getScriptInventory(req.body.mode);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/explain_script_cached', async (req, res) => {
+    try {
+      const result = await tools.explainScriptCached(req.body.instancePath);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
+
+  app.post('/mcp/get_subsystem_summary', async (req, res) => {
+    try {
+      const result = await tools.getSubsystemSummary(req.body.subsystem);
       res.json(result);
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
@@ -736,6 +790,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   app.post('/mcp/get_diagnostics', async (req, res) => {
     try {
       sweepIdempotencyCache();
+      const toolDiagnostics = await tools.getDiagnostics();
+      const runtimePayload = JSON.parse(toolDiagnostics.content[0].text);
       res.json({
         content: [
           {
@@ -756,6 +812,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
               recentErrors,
               bridge: bridge.getStats(),
               writeQueue: tools.getWriteQueueStats(),
+              runtime: runtimePayload.runtime,
+              snapshots: runtimePayload.snapshots,
             }, null, 2)
           }
         ]

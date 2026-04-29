@@ -1,4 +1,5 @@
 import Utils from "../Utils";
+import StructureMap from "../StructureMap";
 
 const ChangeHistoryService = game.GetService("ChangeHistoryService");
 const ScriptEditorService = game.GetService("ScriptEditorService");
@@ -123,7 +124,10 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (updateSuccess) return updateResult;
+	if (updateSuccess) {
+		StructureMap.markDirty("set-script-source");
+		return updateResult;
+	}
 
 	const [directSuccess, directResult] = pcall(() => {
 		const oldSource = (instance as unknown as { Source: string }).Source;
@@ -138,7 +142,10 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (directSuccess) return directResult;
+	if (directSuccess) {
+		StructureMap.markDirty("set-script-source");
+		return directResult;
+	}
 
 	const [replaceSuccess, replaceResult] = pcall(() => {
 		const parent = instance.Parent;
@@ -166,7 +173,10 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (replaceSuccess) return replaceResult;
+	if (replaceSuccess) {
+		StructureMap.markDirty("set-script-source");
+		return replaceResult;
+	}
 	return {
 		error: `Failed to set script source. UpdateSourceAsync failed: ${updateResult}. Direct assignment failed: ${directResult}. Replace method failed: ${replaceResult}`,
 	};
@@ -216,7 +226,10 @@ function editScriptLines(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (success) return result;
+	if (success) {
+		StructureMap.markDirty("edit-script-lines");
+		return result;
+	}
 	return { error: `Failed to edit script lines: ${result}` };
 }
 
@@ -259,7 +272,10 @@ function insertScriptLines(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (success) return result;
+	if (success) {
+		StructureMap.markDirty("insert-script-lines");
+		return result;
+	}
 	return { error: `Failed to insert script lines: ${result}` };
 }
 
@@ -302,7 +318,10 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 		};
 	});
 
-	if (success) return result;
+	if (success) {
+		StructureMap.markDirty("delete-script-lines");
+		return result;
+	}
 	return { error: `Failed to delete script lines: ${result}` };
 }
 

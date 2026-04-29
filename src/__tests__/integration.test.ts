@@ -203,4 +203,21 @@ describe('Integration Tests', () => {
       jest.useRealTimers();
     });
   });
+
+  describe('Structure Map Diagnostics Flow', () => {
+    test('should surface structure map cache fields in diagnostics after MCP activation', async () => {
+      await request(app).post('/ready').expect(200);
+      app.setMCPServerActive(true);
+
+      const diagnostics = await request(app)
+        .post('/mcp/get_diagnostics')
+        .send({})
+        .expect(200);
+
+      const payload = JSON.parse(diagnostics.body.content[0].text);
+      expect(payload.runtime.structureMap).toBeTruthy();
+      expect(payload.runtime.structureMap.cache).toBeTruthy();
+      expect(payload.runtime.structureMap.summaries).toBeTruthy();
+    });
+  });
 });

@@ -18,6 +18,25 @@ export interface Connection {
 	heartbeatConnection?: RBXScriptConnection;
 }
 
+export type ActivityLevel = "info" | "success" | "warn" | "error";
+
+export interface ActivityEntry {
+	id: number;
+	timestamp: number;
+	level: ActivityLevel;
+	title: string;
+	detail: string;
+	endpoint?: string;
+}
+
+export interface PluginSettings {
+	parallelAgents: number;
+	useLightModel: boolean;
+	useStructureMapping: boolean;
+	autoPortDiscovery: boolean;
+	verboseActivity: boolean;
+}
+
 export interface RequestData {
 	[key: string]: unknown;
 }

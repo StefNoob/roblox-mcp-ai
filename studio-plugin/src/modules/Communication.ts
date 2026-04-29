@@ -8,6 +8,7 @@ import InstanceHandlers from "./handlers/InstanceHandlers";
 import ScriptHandlers from "./handlers/ScriptHandlers";
 import MetadataHandlers from "./handlers/MetadataHandlers";
 import TestHandlers from "./handlers/TestHandlers";
+import StructureMap from "./StructureMap";
 import { Connection, RequestPayload, PollResponse } from "../types";
 
 type Handler = (data: Record<string, unknown>) => unknown;
@@ -24,6 +25,10 @@ const routeMap: Record<string, Handler> = {
 	"/api/search-by-property": QueryHandlers.searchByProperty,
 	"/api/class-info": QueryHandlers.getClassInfo,
 	"/api/project-structure": QueryHandlers.getProjectStructure,
+	"/api/structure-map-summary": StructureMap.getStructureMapSummary,
+	"/api/query-structure-map": StructureMap.queryStructureMap,
+	"/api/script-inventory": StructureMap.getScriptInventory,
+	"/api/refresh-structure-map": StructureMap.refreshStructureMap,
 
 	"/api/set-property": PropertyHandlers.setProperty,
 	"/api/mass-set-property": PropertyHandlers.massSetProperty,
@@ -60,9 +65,42 @@ const routeMap: Record<string, Handler> = {
 	"/api/get-playtest-output": TestHandlers.getPlaytestOutput,
 };
 
+const STRUCTURE_MAP_ENDPOINTS = new Set<string>([
+	"/api/structure-map-summary",
+	"/api/query-structure-map",
+	"/api/script-inventory",
+	"/api/refresh-structure-map",
+]);
+
+function log(level: "info" | "success" | "warn" | "error", title: string, detail: string, endpoint?: string) {
+	UI.pushActivity(level, title, detail, endpoint);
+}
+
+function isStructureMapEnabled(): boolean {
+	return State.getPluginSettings().useStructureMapping;
+}
+
+function getPluginCapabilities(): Record<string, boolean> {
+	const settings = State.getPluginSettings();
+	return {
+		pluginUiV2: true,
+		multiConnectionTabs: true,
+		activityTimeline: true,
+		settingsPanel: true,
+		useLightModel: settings.useLightModel,
+		useStructureMapping: settings.useStructureMapping,
+		autoPortDiscovery: settings.autoPortDiscovery,
+		verboseActivity: settings.verboseActivity,
+	};
+}
+
 function processRequest(request: RequestPayload): unknown {
 	const endpoint = request.endpoint;
 	const data = request.data ?? {};
+
+	if (STRUCTURE_MAP_ENDPOINTS.has(endpoint) && !isStructureMapEnabled()) {
+		return { error: "Structure map disabled in plugin settings" };
+	}
 
 	const handler = routeMap[endpoint];
 	if (handler) {
@@ -99,10 +137,17 @@ function pollForRequests(connIndex: number) {
 	conn.isPolling = true;
 
 	const [success, result] = pcall(() => {
+		const capsJson = HttpService.JSONEncode(getPluginCapabilities());
+		const capsEncoded = HttpService.UrlEncode(capsJson);
+		const pollUrl = `${conn.serverUrl}/poll?v=${State.CURRENT_VERSION}&sid=studio-plugin&caps=${capsEncoded}`;
 		return HttpService.RequestAsync({
-			Url: `${conn.serverUrl}/poll`,
+			Url: pollUrl,
 			Method: "GET",
-			Headers: { "Content-Type": "application/json" },
+			Headers: {
+				"Content-Type": "application/json",
+				"x-mcp-plugin-version": State.CURRENT_VERSION,
+				"x-mcp-plugin-capabilities": capsJson,
+			},
 		});
 	});
 
@@ -140,6 +185,7 @@ function pollForRequests(connIndex: number) {
 				conn.mcpWaitStartTime = undefined;
 				el.troubleshootLabel.Visible = false;
 				UI.stopPulseAnimation();
+				log("success", "MCP connected", `Connected on port ${conn.port}`);
 			} else if (!mcpConnected) {
 				el.statusLabel.Text = "Waiting for MCP server";
 				el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
@@ -174,17 +220,23 @@ function pollForRequests(connIndex: number) {
 		}
 
 		if (data.request && mcpConnected) {
+			log("info", "MCP request received", data.request.endpoint, data.request.endpoint);
 			task.spawn(() => {
 				const [ok, response] = pcall(() => processRequest(data.request!));
 				if (ok) {
 					sendResponse(conn, data.requestId!, response);
+					log("success", "MCP response sent", data.request!.endpoint, data.request!.endpoint);
 				} else {
 					sendResponse(conn, data.requestId!, { error: tostring(response) });
+					log("error", "MCP handler error", tostring(response), data.request!.endpoint);
 				}
 			});
 		}
 	} else if (conn.isActive) {
 		conn.consecutiveFailures++;
+		if (conn.consecutiveFailures === 2 || conn.consecutiveFailures % 10 === 0) {
+			log("warn", "Polling retry", `Attempt ${conn.consecutiveFailures} on port ${conn.port}`);
+		}
 
 		if (conn.consecutiveFailures > 1) {
 			conn.currentRetryDelay = math.min(
@@ -268,6 +320,7 @@ function pollForRequests(connIndex: number) {
 }
 
 function discoverPort(): number | undefined {
+	if (!State.getPluginSettings().autoPortDiscovery) return undefined;
 	let firstActivePort: number | undefined;
 	for (let offset = 0; offset < 5; offset++) {
 		const port = State.BASE_PORT + offset;
@@ -292,6 +345,65 @@ function discoverPort(): number | undefined {
 	return firstActivePort;
 }
 
+function sendReadyHandshake(conn: Connection): boolean {
+	const settings = State.getPluginSettings();
+	const [ok] = pcall(() => {
+		HttpService.RequestAsync({
+			Url: `${conn.serverUrl}/ready`,
+			Method: "POST",
+			Headers: { "Content-Type": "application/json" },
+			Body: HttpService.JSONEncode({
+				pluginReady: true,
+				timestamp: tick(),
+				version: State.CURRENT_VERSION,
+				pluginInstanceId: "studio-plugin",
+				capabilities: getPluginCapabilities(),
+				profile: {
+					parallelAgents: settings.parallelAgents,
+					useLightModel: settings.useLightModel,
+					useStructureMapping: settings.useStructureMapping,
+				},
+			}),
+		});
+	});
+	return ok;
+}
+
+function discoverAndApplyActivePort(): number | undefined {
+	const idx = State.getActiveTabIndex();
+	const conn = State.getConnection(idx);
+	if (!conn) return undefined;
+	const discovered = discoverPort();
+	if (discovered !== undefined && discovered !== conn.port) {
+		conn.port = discovered;
+		conn.serverUrl = `http://localhost:${discovered}`;
+		const el = UI.getElements();
+		el.urlInput.Text = conn.serverUrl;
+		log("success", "Port discovered", `Switched active connection to ${discovered}`);
+		return discovered;
+	}
+	if (discovered === undefined) {
+		log("warn", "Port discovery", "No active MCP endpoint found in scan range");
+	} else {
+		log("info", "Port discovery", `Already on best port ${discovered}`);
+	}
+	return discovered;
+}
+
+function refreshStructureMapFromQuickAction() {
+	if (!isStructureMapEnabled()) {
+		log("warn", "Structure map", "Feature disabled in settings");
+		return;
+	}
+	const [ok, result] = pcall(() => StructureMap.refreshStructureMap({}));
+	if (ok) {
+		const version = (result as Record<string, unknown>).version;
+		log("success", "Structure map refreshed", `Version ${tostring(version)}`);
+	} else {
+		log("error", "Structure map refresh failed", tostring(result));
+	}
+}
+
 function activatePlugin(connIndex?: number) {
 	const idx = connIndex ?? State.getActiveTabIndex();
 	const conn = State.getConnection(idx);
@@ -311,6 +423,7 @@ function activatePlugin(connIndex?: number) {
 		UI.updateUIState();
 	}
 	UI.updateTabDot(idx);
+	log("info", "Connection activated", `Activating plugin on ${conn.serverUrl}`);
 
 	task.spawn(() => {
 		const discoveredPort = discoverPort();
@@ -333,14 +446,12 @@ function activatePlugin(connIndex?: number) {
 			});
 		}
 
-		pcall(() => {
-			HttpService.RequestAsync({
-				Url: `${conn.serverUrl}/ready`,
-				Method: "POST",
-				Headers: { "Content-Type": "application/json" },
-				Body: HttpService.JSONEncode({ pluginReady: true, timestamp: tick() }),
-			});
-		});
+		const readyOk = sendReadyHandshake(conn);
+		if (readyOk) {
+			log("success", "Ready handshake sent", conn.serverUrl);
+		} else {
+			log("warn", "Ready handshake failed", conn.serverUrl);
+		}
 	});
 }
 
@@ -350,6 +461,7 @@ function deactivatePlugin(connIndex?: number) {
 	if (!conn) return;
 
 	conn.isActive = false;
+	log("info", "Connection deactivated", `Disconnected from ${conn.serverUrl}`);
 
 	if (idx === State.getActiveTabIndex()) UI.updateUIState();
 	UI.updateTabDot(idx);
@@ -411,5 +523,22 @@ export = {
 	activatePlugin,
 	deactivatePlugin,
 	deactivateAll,
+	discoverAndApplyActivePort,
+	refreshStructureMapFromQuickAction,
+	sendReadyHandshakeForActive: () => {
+		const conn = State.getActiveConnection();
+		if (!conn) return false;
+		const ok = sendReadyHandshake(conn);
+		if (ok) {
+			log("success", "Manual MCP sync", conn.serverUrl);
+		} else {
+			log("error", "Manual MCP sync failed", conn.serverUrl);
+		}
+		return ok;
+	},
+	clearActivityFeed: () => {
+		State.clearActivity();
+		UI.pushActivity("info", "Activity feed", "Feed cleared");
+	},
 	checkForUpdates,
 };

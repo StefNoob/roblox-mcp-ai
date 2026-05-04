@@ -44,16 +44,17 @@ An [MCP](https://modelcontextprotocol.io/) server that connects AI assistants di
 > Just copy and paste this to your AI agent:
 >
 > ```
-> Go to https://raw.githubusercontent.com/aaronaalmendarez/roblox-mcp/main/AGENT.md
-> Read the entire file, then set up the Roblox Studio MCP on my machine. Follow all the installation steps in the "Complete Installation Guide" section.
+> Go to https://raw.githubusercontent.com/aaronaalmendarez/roblox-mcp/main/AGENT_LITE.md
+> Follow it first to set up and use Roblox Studio MCP with a map-first workflow. Open AGENT.md only if you need the full operator guide.
 > ```
 >
 > Your agent will handle cloning, building, configuring MCP, and setting up Blueprint V1 automatically.
 >
 > ### Option 2: Manual
 >
-> - **[📖 View AGENT.md on GitHub](https://github.com/aaronaalmendarez/roblox-mcp/blob/main/AGENT.md)**
-> - **[📋 View Raw](https://raw.githubusercontent.com/aaronaalmendarez/roblox-mcp/main/AGENT.md)** (copy all)
+> - **[📖 View AGENT_LITE.md on GitHub](https://github.com/aaronaalmendarez/roblox-mcp/blob/main/AGENT_LITE.md)**
+> - **[📋 View Raw](https://raw.githubusercontent.com/aaronaalmendarez/roblox-mcp/main/AGENT_LITE.md)** (copy all)
+> - **[📚 Full operator guide](https://github.com/aaronaalmendarez/roblox-mcp/blob/main/AGENT.md)**
 
 ---
 

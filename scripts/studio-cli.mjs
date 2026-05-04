@@ -16,6 +16,7 @@ import {
   banner, bullet, c, drawBox, drawTable, err, header, info, logo, ok,
   progressBar, running, section, Spinner, stopped, style, truncate, warn,
 } from './cli/ui.mjs';
+import { shouldRunMcpInStdioMode } from './cli/mcp-mode.mjs';
 import {
   getStatus, isAlive, listTracked, removePid, run, runDetached, stopAll, stopProcess,
 } from './cli/proc.mjs';
@@ -26,6 +27,9 @@ const ROOT = path.join(__dirname, '..');
 const PACKAGE_JSON = path.join(ROOT, 'package.json');
 
 const MCP_BASE = (process.env.ROBLOX_MCP_URL || 'http://localhost:3002').replace(/\/$/, '');
+const DEFAULT_MCP_BASES = process.env.ROBLOX_MCP_URL
+  ? [MCP_BASE]
+  : [3002, 3003, 3004, 3005, 3006].map((port) => `http://localhost:${port}`);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Argument Parser
@@ -144,18 +148,20 @@ function execCapture(command, args, cwd) {
   });
 }
 
-async function waitForMcp(timeoutMs = 10000) {
+async function findActiveMcpBase(timeoutMs = 10000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    try {
-      const res = await fetch(`${MCP_BASE}/health`, { signal: AbortSignal.timeout(500) });
-      if (res.ok) return true;
-    } catch {
-      // ignore
+    for (const base of DEFAULT_MCP_BASES) {
+      try {
+        const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(500) });
+        if (res.ok) return base;
+      } catch {
+        // ignore
+      }
     }
     await new Promise((r) => setTimeout(r, 300));
   }
-  return false;
+  return null;
 }
 
 async function waitForRojo(timeoutMs = 15000) {
@@ -210,9 +216,9 @@ async function cmdDev(args) {
       },
     });
     children.push(child);
-    const up = await waitForMcp(10000);
-    if (up) {
-      s.succeed('MCP server listening on port 3002');
+    const activeBase = await findActiveMcpBase(10000);
+    if (activeBase) {
+      s.succeed(`MCP server listening on ${activeBase}`);
     } else {
       s.warn('MCP server started but health check timed out');
     }
@@ -332,6 +338,29 @@ async function cmdServe(args) {
 
 async function cmdMcp(args) {
   const verbose = args.booleans.has('verbose');
+  const stdioMode = shouldRunMcpInStdioMode({
+    forceStdio: args.booleans.has('stdio') || process.env.ROBLOX_MCP_STDIO === '1',
+    forceManaged: args.booleans.has('managed') || process.env.ROBLOX_MCP_MANAGED === '1',
+    stdinIsTTY: Boolean(process.stdin.isTTY),
+    stdoutIsTTY: Boolean(process.stdout.isTTY),
+  });
+
+  if (stdioMode) {
+    await new Promise((resolve, reject) => {
+      const child = spawn('node', ['dist/index.js'], {
+        cwd: ROOT,
+        stdio: 'inherit',
+        shell: true,
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`MCP server exited with code ${code}`));
+      });
+    });
+    return;
+  }
+
   const status = await getStatus('mcp-server');
   if (status.running) {
     console.log(`${running('MCP server')} already running (pid ${status.pid})`);
@@ -346,9 +375,9 @@ async function cmdMcp(args) {
     },
   });
 
-  const up = await waitForMcp(10000);
-  if (up) {
-    s.succeed('MCP server listening on port 3002');
+  const activeBase = await findActiveMcpBase(10000);
+  if (activeBase) {
+    s.succeed(`MCP server listening on ${activeBase}`);
   } else {
     s.warn('MCP server started but health check timed out');
   }
@@ -541,7 +570,7 @@ async function cmdPlace(args) {
 
     const s = new Spinner('Detecting Studio place...').start();
     const placeInfo = await getCurrentPlaceInfo();
-    s.succeed(`Detected: ${placeInfo.placeName} (${place.placeId})`);
+    s.succeed(`Detected: ${placeInfo.placeName} (${placeInfo.placeId})`);
 
     const registry = await loadRegistry();
     const existing = findPlace(registry, String(placeInfo.placeId));
@@ -620,9 +649,15 @@ async function cmdStatus(args) {
   const healthS = new Spinner('Checking MCP health...').start();
   let health = null;
   try {
-    const res = await fetch(`${MCP_BASE}/health`, { signal: AbortSignal.timeout(2000) });
-    health = await res.json();
-    healthS.succeed('MCP health check passed');
+    const activeBase = await findActiveMcpBase(2000);
+    if (activeBase) {
+      const res = await fetch(`${activeBase}/health`, { signal: AbortSignal.timeout(2000) });
+      health = await res.json();
+      health.__baseUrl = activeBase;
+      healthS.succeed(`MCP health check passed (${activeBase})`);
+    } else {
+      throw new Error('MCP unreachable');
+    }
   } catch {
     healthS.fail('MCP unreachable');
   }
@@ -631,6 +666,7 @@ async function cmdStatus(args) {
     const lines = [
       `${c.bold}Plugin:${c.reset}      ${health.pluginConnected ? ok('connected') : err('disconnected')}`,
       `${c.bold}MCP Server:${c.reset}  ${health.mcpServerActive ? ok('active') : err('inactive')}`,
+      `${c.bold}Endpoint:${c.reset}    ${health.__baseUrl || MCP_BASE}`,
       `${c.bold}Version:${c.reset}     ${health.plugin?.version || c.dim + 'unknown' + c.reset}`,
     ];
     if (health.bridge?.p90LatencyMs) {
@@ -783,6 +819,8 @@ function printHelp() {
     `${c.bold}--verbose${c.reset}         ${c.dim}Show process output${c.reset}`,
     `${c.bold}--json${c.reset}            ${c.dim}Machine-readable output${c.reset}`,
     `${c.bold}--dry-run${c.reset}         ${c.dim}Preview changes without applying${c.reset}`,
+    `${c.bold}--stdio${c.reset}           ${c.dim}Run studio mcp as a foreground stdio MCP server${c.reset}`,
+    `${c.bold}--managed${c.reset}         ${c.dim}Force the process-managed studio mcp launcher${c.reset}`,
   ], { title: 'Global Flags', color: c.brightMagenta }));
 }
 

@@ -2,6 +2,21 @@
 
 Roblox Studio MCP uses **stdio transport** and is provider-agnostic — it works with any MCP host that can launch a local command.
 
+## Low-Token Bootstrap
+
+If your client lets you give the agent a startup guide, prefer `AGENT_LITE.md` first and keep `AGENT.md` as the full fallback.
+
+Recommended map-first discovery flow:
+
+1. `get_place_info`
+2. `get_structure_map_summary`
+3. `query_structure_map`
+4. `get_script_inventory` or `get_subsystem_summary`
+5. `get_project_structure` only for targeted branches
+6. `get_script_source` only when raw code is required
+
+This keeps startup and exploration smaller than starting with wide tree scans or full script reads.
+
 ---
 
 ## Universal Command
@@ -9,12 +24,12 @@ Roblox Studio MCP uses **stdio transport** and is provider-agnostic — it works
 Use this in any client that accepts a command string:
 
 ```
-npx -y robloxstudio-mcp@latest
+npx -y @aaronalm19/roblox-mcp@latest
 ```
 
 > **Windows note:** If `npx` fails to resolve, prefix with `cmd /c`:
 > ```
-> cmd /c npx -y robloxstudio-mcp@latest
+> cmd /c npx -y @aaronalm19/roblox-mcp@latest
 > ```
 
 ---
@@ -22,13 +37,13 @@ npx -y robloxstudio-mcp@latest
 ## Claude Code
 
 ```bash
-claude mcp add robloxstudio -- npx robloxstudio-mcp
+claude mcp add robloxstudio -- npx -y @aaronalm19/roblox-mcp@latest
 ```
 
 ## Gemini CLI
 
 ```bash
-gemini mcp add robloxstudio npx --trust -- -y robloxstudio-mcp
+gemini mcp add robloxstudio npx --trust -- -y @aaronalm19/roblox-mcp@latest
 ```
 
 ## Claude Desktop
@@ -40,7 +55,7 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "npx",
-      "args": ["-y", "robloxstudio-mcp@latest"]
+      "args": ["-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }
@@ -54,7 +69,7 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "robloxstudio-mcp@latest"]
+      "args": ["/c", "npx", "-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }
@@ -68,7 +83,7 @@ Add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.robloxstudio]
 command = "npx"
-args = ["-y", "robloxstudio-mcp@latest"]
+args = ["-y", "@aaronalm19/roblox-mcp@latest"]
 ```
 
 <details>
@@ -77,7 +92,7 @@ args = ["-y", "robloxstudio-mcp@latest"]
 ```toml
 [mcp_servers.robloxstudio]
 command = "cmd"
-args = ["/c", "npx", "-y", "robloxstudio-mcp@latest"]
+args = ["/c", "npx", "-y", "@aaronalm19/roblox-mcp@latest"]
 ```
 </details>
 
@@ -92,7 +107,7 @@ Add to `~/.config/opencode/opencode.json`:
     "robloxstudio": {
       "type": "local",
       "enabled": true,
-      "command": ["npx", "-y", "robloxstudio-mcp@latest"]
+      "command": ["npx", "-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }
@@ -108,7 +123,7 @@ Add to `~/.config/opencode/opencode.json`:
     "robloxstudio": {
       "type": "local",
       "enabled": true,
-      "command": ["cmd", "/c", "npx", "-y", "robloxstudio-mcp@latest"]
+      "command": ["cmd", "/c", "npx", "-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }
@@ -124,7 +139,7 @@ Any client that reads a `mcpServers` JSON block (Cursor, Windsurf, etc.):
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "npx",
-      "args": ["-y", "robloxstudio-mcp@latest"]
+      "args": ["-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }

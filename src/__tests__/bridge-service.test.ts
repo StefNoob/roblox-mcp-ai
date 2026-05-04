@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { BridgeService } from '../bridge-service';
 
 describe('BridgeService', () => {
@@ -155,6 +156,90 @@ describe('BridgeService', () => {
       bridgeService.resolveRequest(thirdRequest!.requestId, {});
 
       expect(bridgeService.getPendingRequest()).toBeNull();
+    });
+  });
+
+  describe('Studio Session Metadata', () => {
+    test('should store place metadata for studio sessions', () => {
+      bridgeService.upsertStudioSession('studio-a', {
+        ready: true,
+        lastSeenAt: Date.now(),
+        placeId: 123456,
+        placeName: 'Session Place',
+      });
+
+      const [session] = bridgeService.getStudioSessions();
+      expect(session?.sessionId).toBe('studio-a');
+      expect(session?.placeId).toBe(123456);
+      expect(session?.placeName).toBe('Session Place');
+    });
+
+    test('should preserve existing place metadata on partial session updates', () => {
+      bridgeService.upsertStudioSession('studio-a', {
+        ready: true,
+        lastSeenAt: Date.now(),
+        placeId: 123456,
+        placeName: 'Session Place',
+      });
+      bridgeService.upsertStudioSession('studio-a', {
+        ready: false,
+      });
+
+      const [session] = bridgeService.getStudioSessions();
+      expect(session?.ready).toBe(false);
+      expect(session?.placeId).toBe(123456);
+      expect(session?.placeName).toBe('Session Place');
+    });
+  });
+
+  describe('Session Routing', () => {
+    test('should prioritize requests targeted to polling session', async () => {
+      bridgeService.sendRequest('/api/unscoped', { order: 1 });
+      bridgeService.sendRequest('/api/source', { order: 2 }, { sessionId: 'source' });
+      bridgeService.sendRequest('/api/target', { order: 3 }, { sessionId: 'target' });
+
+      const targetPending = bridgeService.getPendingRequest('target');
+      expect(targetPending?.request.endpoint).toBe('/api/target');
+
+      const sourcePending = bridgeService.getPendingRequest('source');
+      expect(sourcePending?.request.endpoint).toBe('/api/source');
+    });
+
+    test('should not redeliver a leased request before it is resolved', async () => {
+      const requestPromise = bridgeService.sendRequest('/api/target', { ok: true }, { sessionId: 'target' });
+      requestPromise.catch(() => {});
+
+      const firstLease = bridgeService.getPendingRequest('target');
+      expect(firstLease?.request.endpoint).toBe('/api/target');
+
+      const secondLease = bridgeService.getPendingRequest('target');
+      expect(secondLease).toBeNull();
+
+      bridgeService.resolveRequest(firstLease!.requestId, { done: true });
+      await expect(requestPromise).resolves.toEqual({ done: true });
+    });
+
+    test('should fall back to unscoped request when no targeted request exists', async () => {
+      bridgeService.sendRequest('/api/unscoped', { ok: true });
+      const pending = bridgeService.getPendingRequest('missing');
+      expect(pending?.request.endpoint).toBe('/api/unscoped');
+      expect(pending?.request.targetSessionId).toBeUndefined();
+    });
+
+    test('should clear only requests for disconnected session', async () => {
+      const sourcePromise = bridgeService.sendRequest('/api/source', { ok: true }, { sessionId: 'source' });
+      const targetPromise = bridgeService.sendRequest('/api/target', { ok: true }, { sessionId: 'target' });
+      sourcePromise.catch(() => {});
+      targetPromise.catch(() => {});
+
+      bridgeService.clearPendingRequestsForSession('source');
+
+      await expect(sourcePromise).rejects.toThrow('Connection closed for session source');
+
+      const pending = bridgeService.getPendingRequest('target');
+      expect(pending?.request.endpoint).toBe('/api/target');
+      bridgeService.resolveRequest(pending!.requestId, { ok: true });
+      await expect(targetPromise).resolves.toEqual({ ok: true });
     });
   });
 });

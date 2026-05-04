@@ -1,15 +1,20 @@
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService } from '../bridge-service.js';
 import { createHash } from 'crypto';
+import { spawn } from 'child_process';
+import { existsSync } from 'fs';
 import { gunzipSync } from 'zlib';
-import { readFile, readdir } from 'fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
 import path from 'path';
 import {
   type PersistedStructureMapSnapshot,
+  type PersistedScriptSourceRecord,
   type ScriptSummaryRecord,
   type StructureMapMode,
   type StructureMapNodeRecord,
   StructureMapCache,
+  fnv1a32,
   mergeSummaryIntoSnapshot,
 } from './structure-map-cache.js';
 import { summarizeScriptSource } from './script-summary.js';
@@ -17,6 +22,23 @@ import {
   analyzeArchitectureSnapshot,
   analyzeScriptQuality,
 } from './analysis-tools.js';
+import {
+  parseLuauDiagnostics,
+  replaceLuauFunctionBlock,
+  summarizePerformanceSamples,
+} from './roi-tools.js';
+import {
+  type WriteJobOptions,
+  type WriteOrchestratorConfigPatch,
+  WriteOrchestrator,
+} from './write-orchestrator.js';
+import {
+  type UIGenerationRequest,
+  type UIGenerationResult,
+  type UIPreviewData,
+  createDefaultScalingConfig,
+} from './schemas/ui-generation.js';
+import { parseUIReference } from './ui-reference-parser.js';
 
 type ScriptEditReplaceOperation = {
   op: 'replace';
@@ -47,16 +69,7 @@ type ScriptSnapshotRecord = {
   createdAt: number;
   sourceLength: number;
 };
-type WriteQueueItem<T> = {
-  id: string;
-  priority: number;
-  label: string;
-  run: () => Promise<T>;
-  resolve: (value: T) => void;
-  reject: (error: any) => void;
-  createdAt: number;
-  cancelled: boolean;
-};
+type WriteEnqueueOptions = Omit<WriteJobOptions, 'priority'>;
 type DriftSourceAnalysis = {
   rawHash: string;
   rawLength: number;
@@ -87,32 +100,74 @@ type StructureMapQueryFilters = {
   nameQuery?: string;
   limit?: number;
 };
+type ScriptSourceMetadata = {
+  instancePath: string;
+  className: string;
+  name: string;
+  sourceLength: number;
+  lineCount: number;
+  sourceHash: string;
+};
+type InstanceSnapshotTransferRecord = {
+  id: string;
+  createdAt: number;
+  sourceInstancePath: string;
+  snapshot: any;
+  stats?: {
+    nodeCount?: number;
+    serializedSizeBytes?: number;
+    includeScripts?: boolean;
+    maxDepth?: number;
+  };
+  warnings: string[];
+};
+type DebugLogStreamCursor = {
+  id: string;
+  type: string;
+  createdAt: number;
+  updatedAt: number;
+  lastTimestamp?: number;
+  seenKeys: string[];
+};
 
 export class RobloxStudioTools {
+  private bridge: BridgeService;
   private client: StudioHttpClient;
   private static readonly DIRECT_WRITE_THRESHOLD = 100_000;
   private static readonly DEFAULT_UPLOAD_CHUNK_SIZE = 8192;
+  private static readonly SCRIPT_READ_CHUNK_SIZE = 1000;
   private fastEndpointSupport: 'unknown' | 'yes' | 'no' = 'unknown';
-  private writeQueue: WriteQueueItem<any>[] = [];
-  private writeInFlight: WriteQueueItem<any> | null = null;
-  private writeQueueSeq = 0;
-  private completedWrites = 0;
-  private failedWrites = 0;
+  private scriptMetadataSupport: 'unknown' | 'yes' | 'no' = 'unknown';
+  private writeOrchestrator: WriteOrchestrator;
   private scriptSnapshots: Map<string, ScriptSnapshotRecord> = new Map();
   private scriptSnapshotSeq = 0;
   private readonly maxSnapshots = 250;
   private scriptUploads: Map<string, ScriptUploadSession> = new Map();
   private scriptUploadSeq = 0;
   private readonly maxScriptUploads = 64;
+  private instanceSnapshotTransfers: Map<string, InstanceSnapshotTransferRecord> = new Map();
+  private instanceSnapshotSeq = 0;
+  private readonly maxInstanceSnapshotTransfers = 64;
+  private debugLogStreams: Map<string, DebugLogStreamCursor> = new Map();
+  private debugLogStreamSeq = 0;
+  private readonly maxDebugLogStreams = 64;
   private structureMapCache: StructureMapCache;
 
   constructor(bridge: BridgeService) {
+    this.bridge = bridge;
     this.client = new StudioHttpClient(bridge);
     this.structureMapCache = new StructureMapCache(process.cwd());
+    this.writeOrchestrator = new WriteOrchestrator({
+      maxConcurrency: 2,
+    });
   }
 
   private hashSource(source: string) {
     return createHash('sha256').update(source, 'utf8').digest('hex');
+  }
+
+  private hashSourceFast(source: string) {
+    return fnv1a32(source);
   }
 
   private extractSource(response: any): string {
@@ -120,6 +175,59 @@ export class RobloxStudioTools {
       return response.source;
     }
     return '';
+  }
+
+  private toSourceCacheRecord(
+    instancePath: string,
+    source: string,
+    metadata?: Partial<ScriptSourceMetadata>,
+  ): PersistedScriptSourceRecord {
+    return {
+      instancePath,
+      className: metadata?.className,
+      name: metadata?.name,
+      source,
+      sourceHash: metadata?.sourceHash || this.hashSourceFast(source),
+      sourceLength: metadata?.sourceLength ?? source.length,
+      lineCount: metadata?.lineCount ?? this.countLines(source),
+      updatedAt: Date.now(),
+    };
+  }
+
+  private isFreshSourceCache(
+    cached: PersistedScriptSourceRecord | null,
+    metadata: ScriptSourceMetadata,
+  ) {
+    return Boolean(
+      cached &&
+      cached.sourceHash === metadata.sourceHash &&
+      cached.sourceLength === metadata.sourceLength &&
+      cached.lineCount === metadata.lineCount
+    );
+  }
+
+  private buildSourceResponse(instancePath: string, source: string, metadata?: Partial<ScriptSourceMetadata>) {
+    const lineCount = metadata?.lineCount ?? this.countLines(source);
+    return {
+      instancePath,
+      className: metadata?.className,
+      name: metadata?.name,
+      source,
+      sourceLength: metadata?.sourceLength ?? source.length,
+      lineCount,
+      startLine: 1,
+      endLine: lineCount,
+      isPartial: false,
+      truncated: false,
+    };
+  }
+
+  private async saveSourceCache(
+    instancePath: string,
+    source: string,
+    metadata?: Partial<ScriptSourceMetadata>,
+  ) {
+    await this.structureMapCache.saveScriptSource(this.toSourceCacheRecord(instancePath, source, metadata));
   }
 
   private compactScriptWriteResponse(response: any) {
@@ -133,6 +241,88 @@ export class RobloxStudioTools {
     }
 
     return base;
+  }
+
+  private asToolResult(payload: unknown) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  }
+
+  private nextDebugLogStreamId() {
+    this.debugLogStreamSeq += 1;
+    return `dls_${this.debugLogStreamSeq}`;
+  }
+
+  private cleanupDebugLogStreams(maxAgeMs: number = 6 * 60 * 60 * 1000) {
+    const now = Date.now();
+    const ordered = [...this.debugLogStreams.values()].sort((a, b) => a.updatedAt - b.updatedAt);
+    for (const stream of ordered) {
+      if (this.debugLogStreams.size <= this.maxDebugLogStreams && now - stream.updatedAt <= maxAgeMs) {
+        continue;
+      }
+      this.debugLogStreams.delete(stream.id);
+    }
+  }
+
+  private makeDebugLogKey(entry: any) {
+    return `${entry?.timestamp ?? ''}|${entry?.messageType ?? ''}|${entry?.message ?? ''}`;
+  }
+
+  private sleep(ms: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  private detectLuauLspBinary() {
+    const envPath = process.env.LUAU_LSP_PATH;
+    if (envPath && existsSync(envPath)) {
+      return envPath;
+    }
+    const localName = process.platform === 'win32' ? 'luau-lsp.exe' : 'luau-lsp';
+    const localPath = path.resolve(process.cwd(), '.tools', 'luau-lsp', localName);
+    if (existsSync(localPath)) {
+      return localPath;
+    }
+    return 'luau-lsp';
+  }
+
+  private async runLuauDiagnosticsCommand(filePaths: string[]) {
+    const binary = this.detectLuauLspBinary();
+    return await new Promise<{ code: number; stdout: string; stderr: string; binary: string }>((resolve, reject) => {
+      const child = spawn(binary, [
+        'analyze',
+        '--no-flags-enabled',
+        '--platform=roblox',
+        ...filePaths,
+      ], {
+        cwd: process.cwd(),
+        shell: false,
+        env: process.env,
+      });
+
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        resolve({
+          code: code ?? 1,
+          stdout,
+          stderr,
+          binary,
+        });
+      });
+    });
   }
 
   private nextUploadId() {
@@ -197,46 +387,164 @@ export class RobloxStudioTools {
     );
   }
 
+  private async getScriptMetadata(instancePath: string): Promise<ScriptSourceMetadata | null> {
+    if (this.scriptMetadataSupport === 'no') {
+      return null;
+    }
+
+    try {
+      const response = await this.client.request('/api/get-script-metadata', { instancePath });
+      if (!response || typeof response !== 'object' || typeof response.sourceHash !== 'string') {
+        return null;
+      }
+
+      this.scriptMetadataSupport = 'yes';
+      return {
+        instancePath,
+        className: String((response as any).className || ''),
+        name: String((response as any).name || ''),
+        sourceLength: Number((response as any).sourceLength || 0),
+        lineCount: Number((response as any).lineCount || 0),
+        sourceHash: String((response as any).sourceHash),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('Unknown endpoint: /api/get-script-metadata')) {
+        this.scriptMetadataSupport = 'no';
+      }
+      return null;
+    }
+  }
+
+  private async readScriptSourceChunks(
+    instancePath: string,
+    lineCount: number,
+    metadata?: Partial<ScriptSourceMetadata>,
+  ) {
+    const chunkSize = RobloxStudioTools.SCRIPT_READ_CHUNK_SIZE;
+    const requests: Promise<any>[] = [];
+
+    for (let startLine = 1; startLine <= lineCount; startLine += chunkSize) {
+      const endLine = Math.min(lineCount, startLine + chunkSize - 1);
+      requests.push(this.client.request('/api/get-script-source', {
+        instancePath,
+        startLine,
+        endLine,
+        includeNumberedSource: false,
+      }));
+    }
+
+    const responses = await Promise.all(requests);
+    const fullSource = responses.map((chunk) => this.extractSource(chunk)).join('\n');
+    await this.saveSourceCache(instancePath, fullSource, metadata);
+
+    return {
+      ...this.buildSourceResponse(instancePath, fullSource, metadata),
+      reconstructedFromChunks: true,
+    };
+  }
+
   private async readFullScriptSource(instancePath: string) {
-    const response = await this.client.request('/api/get-script-source', { instancePath, fullSource: true });
+    const metadata = await this.getScriptMetadata(instancePath);
+    if (metadata) {
+      const cached = await this.structureMapCache.loadScriptSource(instancePath);
+      if (this.isFreshSourceCache(cached, metadata)) {
+        return this.buildSourceResponse(instancePath, cached!.source, metadata);
+      }
+
+      if (metadata.lineCount > RobloxStudioTools.SCRIPT_READ_CHUNK_SIZE) {
+        return this.readScriptSourceChunks(instancePath, metadata.lineCount, metadata);
+      }
+    }
+
+    const response = await this.client.request('/api/get-script-source', {
+      instancePath,
+      fullSource: true,
+      includeNumberedSource: false,
+    });
     if (!this.isTruncatedFullSourceResponse(response)) {
+      const source = this.extractSource(response);
+      await this.saveSourceCache(instancePath, source, metadata || {
+        className: typeof response?.className === 'string' ? response.className : undefined,
+        name: typeof response?.name === 'string' ? response.name : undefined,
+        sourceLength: typeof response?.sourceLength === 'number' ? response.sourceLength : source.length,
+        lineCount: typeof response?.lineCount === 'number' ? response.lineCount : this.countLines(source),
+      });
       return response;
     }
 
-    const lineCount = typeof response?.lineCount === 'number' ? response.lineCount : 0;
+    const lineCount = metadata?.lineCount
+      ?? (typeof response?.lineCount === 'number' ? response.lineCount : 0);
     if (lineCount < 1) {
       throw new Error(`Plugin returned truncated source for ${instancePath} without a valid lineCount.`);
     }
 
-    const chunkSize = 1000;
-    const chunks: string[] = [];
-    for (let startLine = 1; startLine <= lineCount; startLine += chunkSize) {
-      const endLine = Math.min(lineCount, startLine + chunkSize - 1);
-      const chunkResponse = await this.client.request('/api/get-script-source', {
-        instancePath,
-        startLine,
-        endLine,
-      });
-      chunks.push(this.extractSource(chunkResponse));
-    }
-
-    const fullSource = chunks.join('\n');
-
-    return {
-      ...response,
-      source: fullSource,
-      startLine: 1,
-      endLine: lineCount,
-      isPartial: false,
-      truncated: false,
-      reconstructedFromChunks: true,
-      sourceLength: fullSource.length,
-      note: 'Full source reconstructed from chunked reads because the plugin returned a truncated full-source response.',
-    };
+    return this.readScriptSourceChunks(instancePath, lineCount, metadata || {
+      className: typeof response?.className === 'string' ? response.className : undefined,
+      name: typeof response?.name === 'string' ? response.name : undefined,
+      sourceLength: typeof response?.sourceLength === 'number' ? response.sourceLength : undefined,
+      lineCount,
+    });
   }
 
   private normalizeSource(source: string) {
     return source.replace(/\r\n/g, '\n');
+  }
+
+  private splitSourceLines(source: string) {
+    const normalized = this.normalizeAllLineEndings(source);
+    const hasTrailingNewline = normalized.endsWith('\n');
+    const lines = normalized.split('\n');
+    if (hasTrailingNewline) {
+      lines.pop();
+    }
+    return {
+      lines,
+      hasTrailingNewline,
+    };
+  }
+
+  private joinSourceLines(lines: string[], hasTrailingNewline: boolean) {
+    const joined = lines.join('\n');
+    return hasTrailingNewline ? `${joined}\n` : joined;
+  }
+
+  private applyBatchScriptOperations(source: string, operations: ScriptEditOperation[]) {
+    const { lines: initialLines, hasTrailingNewline } = this.splitSourceLines(source);
+    const lines = [...initialLines];
+
+    for (const operation of operations) {
+      if (operation.op === 'replace') {
+        if (operation.startLine < 1 || operation.endLine < operation.startLine || operation.endLine > lines.length) {
+          throw new Error(
+            `Replace operation out of range: startLine=${operation.startLine}, endLine=${operation.endLine}, lineCount=${lines.length}`
+          );
+        }
+        const replacement = this.splitSourceLines(operation.newContent).lines;
+        lines.splice(operation.startLine - 1, operation.endLine - operation.startLine + 1, ...replacement);
+        continue;
+      }
+
+      if (operation.op === 'insert') {
+        if (operation.afterLine < 0 || operation.afterLine > lines.length) {
+          throw new Error(
+            `Insert operation out of range: afterLine=${operation.afterLine}, lineCount=${lines.length}`
+          );
+        }
+        const insertion = this.splitSourceLines(operation.newContent).lines;
+        lines.splice(operation.afterLine, 0, ...insertion);
+        continue;
+      }
+
+      if (operation.startLine < 1 || operation.endLine < operation.startLine || operation.endLine > lines.length) {
+        throw new Error(
+          `Delete operation out of range: startLine=${operation.startLine}, endLine=${operation.endLine}, lineCount=${lines.length}`
+        );
+      }
+      lines.splice(operation.startLine - 1, operation.endLine - operation.startLine + 1);
+    }
+
+    return this.joinSourceLines(lines, hasTrailingNewline);
   }
 
   private stripUtf8Bom(source: string) {
@@ -326,6 +634,22 @@ export class RobloxStudioTools {
     return `ss_${this.scriptSnapshotSeq}`;
   }
 
+  private nextInstanceSnapshotTransferId() {
+    this.instanceSnapshotSeq += 1;
+    return `is_${this.instanceSnapshotSeq}`;
+  }
+
+  private cleanupInstanceSnapshotTransfers(maxAgeMs: number = 6 * 60 * 60 * 1000) {
+    const now = Date.now();
+    const ordered = [...this.instanceSnapshotTransfers.values()].sort((a, b) => a.createdAt - b.createdAt);
+    for (const record of ordered) {
+      if (this.instanceSnapshotTransfers.size <= this.maxInstanceSnapshotTransfers && now - record.createdAt <= maxAgeMs) {
+        continue;
+      }
+      this.instanceSnapshotTransfers.delete(record.id);
+    }
+  }
+
   private pushSnapshot(instancePath: string, source: string, label?: string) {
     const normalized = this.normalizeSource(source);
     const record: ScriptSnapshotRecord = {
@@ -350,86 +674,67 @@ export class RobloxStudioTools {
     return record;
   }
 
-  private async processWriteQueue() {
-    if (this.writeInFlight || this.writeQueue.length === 0) {
-      return;
+  private inferResourceKeyFromLabel(label: string) {
+    const idx = label.indexOf(':');
+    if (idx < 0 || idx >= label.length - 1) {
+      return null;
     }
-
-    this.writeQueue.sort((a, b) => {
-      if (a.priority === b.priority) {
-        return a.createdAt - b.createdAt;
-      }
-      return b.priority - a.priority;
-    });
-
-    const item = this.writeQueue.shift()!;
-    if (item.cancelled) {
-      item.reject(new Error(`Write job cancelled: ${item.label}`));
-      void this.processWriteQueue();
-      return;
-    }
-
-    this.writeInFlight = item;
-    try {
-      const result = await item.run();
-      this.completedWrites += 1;
-      item.resolve(result);
-    } catch (error) {
-      this.failedWrites += 1;
-      item.reject(error);
-    } finally {
-      this.writeInFlight = null;
-      void this.processWriteQueue();
-    }
+    const raw = label.slice(idx + 1).trim();
+    return raw.length > 0 ? raw : null;
   }
 
-  private enqueueWrite<T>(label: string, run: () => Promise<T>, priority: number = 0): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const item: WriteQueueItem<T> = {
-        id: `wq_${++this.writeQueueSeq}`,
-        priority,
-        label,
-        run,
-        resolve,
-        reject,
-        createdAt: Date.now(),
-        cancelled: false,
+  private enqueueWrite<T>(
+    label: string,
+    run: () => Promise<T>,
+    priority: number = 0,
+    options?: WriteEnqueueOptions,
+  ): Promise<T> {
+    return this.writeOrchestrator.enqueue(label, run, {
+      ...options,
+      priority,
+      resourceKey: options?.resourceKey ?? this.inferResourceKeyFromLabel(label),
+    });
+  }
+
+  configureTeamOrchestrator(config: WriteOrchestratorConfigPatch) {
+    return this.writeOrchestrator.configure(config);
+  }
+
+  getTeamOrchestratorConfig() {
+    return this.writeOrchestrator.getConfig();
+  }
+
+  getWriteQueueStats(options?: { verbose?: boolean; maxItems?: number }) {
+    const full = this.writeOrchestrator.getStats();
+    const verbose = options?.verbose === true;
+    const maxItems = Math.max(1, Math.min(50, options?.maxItems ?? 5));
+    if (verbose) {
+      return {
+        ...full,
+        inFlightItems: full.inFlightItems.slice(0, maxItems),
+        pendingItems: full.pendingItems.slice(0, maxItems),
       };
-      this.writeQueue.push(item);
-      void this.processWriteQueue();
-    });
-  }
-
-  getWriteQueueStats() {
+    }
     return {
-      inFlight: this.writeInFlight ? {
-        id: this.writeInFlight.id,
-        label: this.writeInFlight.label,
-        priority: this.writeInFlight.priority,
-        ageMs: Date.now() - this.writeInFlight.createdAt,
-      } : null,
-      pending: this.writeQueue.length,
-      pendingItems: this.writeQueue.map((x) => ({
-        id: x.id,
-        label: x.label,
-        priority: x.priority,
-        ageMs: Date.now() - x.createdAt,
-      })),
-      completedWrites: this.completedWrites,
-      failedWrites: this.failedWrites,
+      inFlight: full.inFlight,
+      pending: full.pending,
+      pendingByLane: full.pendingByLane,
+      maxConcurrency: full.maxConcurrency,
+      defaultTeamId: full.defaultTeamId,
+      laneWeights: full.laneWeights,
+      teamStats: full.teamStats,
+      completedWrites: full.completedWrites,
+      failedWrites: full.failedWrites,
+      cancelledWrites: full.cancelledWrites,
+      sampledItems: {
+        inFlight: full.inFlightItems.slice(0, 1),
+        pending: full.pendingItems.slice(0, Math.min(2, maxItems)),
+      },
     };
   }
 
   cancelPendingWrites(prefix?: string) {
-    let cancelled = 0;
-    for (const item of this.writeQueue) {
-      if (!prefix || item.label.startsWith(prefix)) {
-        item.cancelled = true;
-        cancelled += 1;
-      }
-    }
-    this.writeQueue = this.writeQueue.filter((x) => !x.cancelled);
-    return { cancelled };
+    return this.writeOrchestrator.cancelPending((job) => !prefix || job.label.startsWith(prefix));
   }
 
   private async fastWriteSource(instancePath: string, source: string, verify: boolean = true) {
@@ -664,7 +969,10 @@ export class RobloxStudioTools {
   }
 
   private async getStructureMapRuntime() {
-    const cache = await this.structureMapCache.getCacheStats();
+    const latestPlaceId = await this.structureMapCache.getLatestCachedPlaceId();
+    const cache = latestPlaceId
+      ? await this.structureMapCache.getCacheStats(latestPlaceId)
+      : await this.structureMapCache.getCacheStats();
     return {
       cache,
       summaries: {
@@ -830,6 +1138,257 @@ export class RobloxStudioTools {
         {
           type: 'text',
           text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async exportInstanceSnapshot(
+    instancePath: string,
+    options?: {
+      includeScripts?: boolean;
+      maxDepth?: number;
+    },
+    sessionId?: string,
+  ) {
+    if (!instancePath) {
+      throw new Error('Instance path is required for export_instance_snapshot');
+    }
+    const payload = {
+      instancePath,
+      includeScripts: options?.includeScripts !== false,
+      maxDepth: options?.maxDepth,
+    };
+    const response = sessionId
+      ? await this.client.request('/api/export-instance-snapshot', payload, { sessionId })
+      : await this.client.request('/api/export-instance-snapshot', payload);
+
+    if (!response || typeof response !== 'object' || !(response as any).snapshot) {
+      throw new Error('Studio plugin returned an invalid snapshot response.');
+    }
+
+    this.cleanupInstanceSnapshotTransfers();
+    const transfer: InstanceSnapshotTransferRecord = {
+      id: this.nextInstanceSnapshotTransferId(),
+      createdAt: Date.now(),
+      sourceInstancePath: instancePath,
+      snapshot: (response as any).snapshot,
+      stats: (response as any).stats,
+      warnings: Array.isArray((response as any).warnings) ? (response as any).warnings : [],
+    };
+    this.instanceSnapshotTransfers.set(transfer.id, transfer);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            transferId: transfer.id,
+            sourceInstancePath: transfer.sourceInstancePath,
+            createdAt: transfer.createdAt,
+            stats: transfer.stats || null,
+            warnings: transfer.warnings,
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  async importInstanceSnapshot(
+    transferId: string,
+    targetParentPath: string,
+    options?: {
+      rootName?: string;
+      conflictPolicy?: 'rename' | 'replace' | 'fail';
+      namePrefix?: string;
+      nameSuffix?: string;
+      scriptReplacements?: Array<{ find: string; replace: string }>;
+    },
+    sessionId?: string,
+  ) {
+    if (!transferId) {
+      throw new Error('Transfer ID is required for import_instance_snapshot');
+    }
+    if (!targetParentPath) {
+      throw new Error('Target parent path is required for import_instance_snapshot');
+    }
+
+    const transfer = this.instanceSnapshotTransfers.get(transferId);
+    if (!transfer) {
+      throw new Error(`Snapshot transfer not found: ${transferId}`);
+    }
+
+    const payload = {
+      targetParentPath,
+      snapshot: transfer.snapshot,
+      options: options || {},
+    };
+    const response = sessionId
+      ? await this.client.request('/api/import-instance-snapshot', payload, { sessionId })
+      : await this.client.request('/api/import-instance-snapshot', payload);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            transferId,
+            sourceInstancePath: transfer.sourceInstancePath,
+            targetParentPath,
+            result: response,
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  listInstanceSnapshotTransfers() {
+    this.cleanupInstanceSnapshotTransfers();
+    const transfers = [...this.instanceSnapshotTransfers.values()]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((record) => ({
+        transferId: record.id,
+        createdAt: record.createdAt,
+        sourceInstancePath: record.sourceInstancePath,
+        stats: record.stats || null,
+        warnings: record.warnings,
+      }));
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            count: transfers.length,
+            transfers,
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  deleteInstanceSnapshotTransfer(transferId: string) {
+    if (!transferId) {
+      throw new Error('Transfer ID is required for delete_instance_snapshot_transfer');
+    }
+    const deleted = this.instanceSnapshotTransfers.delete(transferId);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            transferId,
+            deleted,
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  async copyInstanceSnapshot(
+    sourceInstancePath: string,
+    targetParentPath: string,
+    options?: {
+      includeScripts?: boolean;
+      maxDepth?: number;
+      rootName?: string;
+      conflictPolicy?: 'rename' | 'replace' | 'fail';
+      namePrefix?: string;
+      nameSuffix?: string;
+      scriptReplacements?: Array<{ find: string; replace: string }>;
+      sourceSessionId?: string;
+      targetSessionId?: string;
+    },
+  ) {
+    const exported = await this.exportInstanceSnapshot(sourceInstancePath, {
+      includeScripts: options?.includeScripts,
+      maxDepth: options?.maxDepth,
+    }, options?.sourceSessionId);
+    const payload = JSON.parse(exported.content[0].text);
+    const imported = await this.importInstanceSnapshot(payload.transferId, targetParentPath, {
+      rootName: options?.rootName,
+      conflictPolicy: options?.conflictPolicy,
+      namePrefix: options?.namePrefix,
+      nameSuffix: options?.nameSuffix,
+      scriptReplacements: options?.scriptReplacements,
+    }, options?.targetSessionId);
+    const importPayload = JSON.parse(imported.content[0].text);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            transferId: payload.transferId,
+            sourceInstancePath,
+            targetParentPath,
+            sourceSessionId: options?.sourceSessionId || null,
+            targetSessionId: options?.targetSessionId || null,
+            export: {
+              stats: payload.stats || null,
+              warnings: payload.warnings || [],
+            },
+            import: importPayload.result,
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  async copyInstanceCrossSession(
+    sourceSessionId: string,
+    targetSessionId: string,
+    sourceInstancePath: string,
+    targetParentPath: string,
+    options?: {
+      includeScripts?: boolean;
+      maxDepth?: number;
+      rootName?: string;
+      conflictPolicy?: 'rename' | 'replace' | 'fail';
+      namePrefix?: string;
+      nameSuffix?: string;
+      scriptReplacements?: Array<{ find: string; replace: string }>;
+    },
+  ) {
+    if (!sourceSessionId || !targetSessionId) {
+      throw new Error('sourceSessionId and targetSessionId are required for copy_instance_cross_session');
+    }
+    if (!sourceInstancePath || !targetParentPath) {
+      throw new Error('sourceInstancePath and targetParentPath are required for copy_instance_cross_session');
+    }
+    const result = await this.copyInstanceSnapshot(sourceInstancePath, targetParentPath, {
+      ...options,
+      sourceSessionId,
+      targetSessionId,
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            ...JSON.parse(result.content[0].text),
+            mode: 'cross-session',
+          }, null, 2)
+        }
+      ]
+    };
+  }
+
+  listStudioSessions(maxAgeMs: number = 60_000) {
+    const sessions = this.bridge.getStudioSessions(maxAgeMs).map((session) => ({
+      ...session,
+      placeId: session.placeId ?? null,
+      placeName: session.placeName ?? null,
+    }));
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            count: sessions.length,
+            sessions,
+            maxAgeMs,
+          }, null, 2)
         }
       ]
     };
@@ -1562,14 +2121,14 @@ export class RobloxStudioTools {
     };
   }
 
-  async getRuntimeState() {
+  async getRuntimeState(verbose: boolean = false) {
     const structureMap = await this.getStructureMapRuntime();
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            writeQueue: this.getWriteQueueStats(),
+            writeQueue: this.getWriteQueueStats({ verbose }),
             fastEndpointSupport: this.fastEndpointSupport,
             structureMap,
             snapshots: {
@@ -1582,7 +2141,7 @@ export class RobloxStudioTools {
     };
   }
 
-  async getDiagnostics() {
+  async getDiagnostics(verbose: boolean = false) {
     const structureMap = await this.getStructureMapRuntime();
     return {
       content: [
@@ -1590,7 +2149,7 @@ export class RobloxStudioTools {
           type: 'text',
           text: JSON.stringify({
             runtime: {
-              writeQueue: this.getWriteQueueStats(),
+              writeQueue: this.getWriteQueueStats({ verbose }),
               fastEndpointSupport: this.fastEndpointSupport,
               structureMap,
             },
@@ -1599,7 +2158,7 @@ export class RobloxStudioTools {
               max: this.maxSnapshots,
               latest: [...this.scriptSnapshots.values()]
                 .sort((a, b) => b.createdAt - a.createdAt)
-                .slice(0, 10)
+                .slice(0, verbose ? 10 : 3)
                 .map((x) => ({
                   id: x.id,
                   instancePath: x.instancePath,
@@ -1746,6 +2305,7 @@ export class RobloxStudioTools {
     const matchesNeedle = typeof verifyNeedle === 'string' ? afterSource.includes(verifyNeedle) : true;
 
     if (matchesHash && matchesNeedle) {
+      await this.saveSourceCache(instancePath, afterSource);
       return {
         content: [
           {
@@ -1952,6 +2512,7 @@ export class RobloxStudioTools {
           startLine,
           endLine,
           fullSource: false,
+          includeNumberedSource: false,
         });
     const source = this.extractSource(response);
     const snapshot = {
@@ -2000,6 +2561,7 @@ export class RobloxStudioTools {
       },
       5,
     );
+    await this.saveSourceCache(instancePath, source);
     let newHash: string | null = null;
     if (expectedHash) {
       const updatedSource = await this.readFullScriptSource(instancePath);
@@ -2039,6 +2601,7 @@ export class RobloxStudioTools {
       async () => this.fastWriteSource(instancePath, source, verify),
       10,
     );
+    await this.saveSourceCache(instancePath, source);
     return {
       content: [
         {
@@ -2118,6 +2681,45 @@ export class RobloxStudioTools {
         9,
       );
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('Unknown endpoint: /api/batch-script-edits')) {
+        if (originalSource === null) {
+          throw new Error('Batch edit fallback could not load the original script source.');
+        }
+        const nextSource = this.applyBatchScriptOperations(originalSource, operations);
+        const writeResponse = await this.enqueueWrite(
+          `batch_script_edits_fallback:${instancePath}`,
+          async () => this.client.request('/api/set-script-source', {
+            instancePath,
+            source: nextSource,
+            preferDirect: false,
+          }),
+          9,
+        );
+
+        const finalResponse = await this.readFullScriptSource(instancePath);
+        const finalSource = this.extractSource(finalResponse);
+        const finalHash = this.hashSource(finalSource);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                instancePath,
+                operationsApplied: operations.length,
+                originalHash,
+                newHash: finalHash,
+                fastMode,
+                fallback: true,
+                fallbackReason: 'plugin-missing-batch-endpoint',
+                writeResponse: this.compactScriptWriteResponse(writeResponse),
+              }, null, 2)
+            }
+          ]
+        };
+      }
       let rollbackSucceeded = false;
       if (rollbackOnFailure && originalSource !== null) {
         try {
@@ -2135,7 +2737,7 @@ export class RobloxStudioTools {
       throw new Error(
         `Batch edit failed for ${operations.length} operations. ` +
         `Rollback ${rollbackOnFailure ? (rollbackSucceeded ? 'succeeded' : 'failed') : 'skipped'}. ` +
-        `Cause: ${error instanceof Error ? error.message : String(error)}`
+        `Cause: ${message}`
       );
     }
 
@@ -2198,6 +2800,124 @@ export class RobloxStudioTools {
         }
       ]
     };
+  }
+
+  async getLuauDiagnostics(options: {
+    instancePaths?: string[];
+    includeSourceHints?: boolean;
+  } = {}) {
+    const instancePaths = Array.isArray(options.instancePaths) ? options.instancePaths.filter(Boolean) : [];
+    if (instancePaths.length === 0) {
+      throw new Error('instancePaths is required for get_luau_diagnostics');
+    }
+
+    const tempDir = await mkdtemp(path.join(tmpdir(), 'roblox-mcp-luau-'));
+    const fileToInstancePath = new Map<string, string>();
+
+    try {
+      let index = 0;
+      for (const instancePath of instancePaths) {
+        const sourceResponse = await this.readFullScriptSource(instancePath);
+        const source = this.extractSource(sourceResponse);
+        const filePath = path.join(tempDir, `script_${index + 1}.luau`);
+        index += 1;
+        await writeFile(filePath, source, 'utf8');
+        fileToInstancePath.set(filePath, instancePath);
+      }
+
+      try {
+        const result = await this.runLuauDiagnosticsCommand([...fileToInstancePath.keys()]);
+        const diagnostics = parseLuauDiagnostics(`${result.stdout}\n${result.stderr}`)
+          .map((entry) => ({
+            ...entry,
+            instancePath: fileToInstancePath.get(entry.filePath) || entry.filePath,
+          }));
+        const visibleDiagnostics = options.includeSourceHints
+          ? diagnostics
+          : diagnostics.map(({ raw, ...rest }) => rest);
+        const severities = {
+          error: diagnostics.filter((entry) => entry.severity === 'error').length,
+          warning: diagnostics.filter((entry) => entry.severity === 'warning').length,
+          info: diagnostics.filter((entry) => entry.severity === 'info').length,
+        };
+        return this.asToolResult({
+          tooling: {
+            available: true,
+            binary: result.binary,
+            exitCode: result.code,
+          },
+          summary: {
+            scriptCount: instancePaths.length,
+            totalFindings: diagnostics.length,
+            severities,
+          },
+          diagnostics: visibleDiagnostics,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/ENOENT|not found/i.test(message)) {
+          return this.asToolResult({
+            tooling: {
+              available: false,
+              reason: 'luau-lsp not installed',
+              installHint: 'Run `npm run luau:install` or set `LUAU_LSP_PATH`.',
+            },
+            summary: {
+              scriptCount: instancePaths.length,
+              totalFindings: 0,
+              severities: { error: 0, warning: 0, info: 0 },
+            },
+            diagnostics: [],
+          });
+        }
+        throw error;
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  async replaceScriptFunction(
+    instancePath: string,
+    functionName: string,
+    newFunctionContent: string,
+    expectedHash?: string,
+  ) {
+    if (!instancePath || !functionName || !newFunctionContent) {
+      throw new Error('instancePath, functionName, and newFunctionContent are required for replace_script_function');
+    }
+
+    const sourceResponse = await this.readFullScriptSource(instancePath);
+    const source = this.extractSource(sourceResponse);
+    const originalHash = this.hashSource(source);
+
+    if (expectedHash && expectedHash !== originalHash) {
+      throw new Error(
+        `Script hash mismatch for ${instancePath}. Expected ${expectedHash} but found ${originalHash}.`,
+      );
+    }
+
+    const replacement = replaceLuauFunctionBlock(source, functionName, newFunctionContent);
+    const writeResponse = await this.enqueueWrite(
+      `replace_script_function:${instancePath}`,
+      async () => this.client.request('/api/set-script-source', {
+        instancePath,
+        source: replacement.source,
+        preferDirect: false,
+      }),
+      9,
+    );
+
+    return this.asToolResult({
+      success: true,
+      instancePath,
+      functionName,
+      originalHash,
+      newHash: this.hashSource(replacement.source),
+      startLine: replacement.startLine,
+      endLine: replacement.endLine,
+      writeResponse: this.compactScriptWriteResponse(writeResponse),
+    });
   }
 
   // Attribute Tools
@@ -2386,5 +3106,526 @@ export class RobloxStudioTools {
         }
       ]
     };
+  }
+
+  async aiControlPlayer(action: string, duration: number = 0.1, speed: number = 1.0) {
+    if (!action) {
+      throw new Error('action is required for ai_control_player');
+    }
+    const validActions = ['move_forward', 'move_backward', 'move_left', 'move_right', 'jump', 'crouch', 'run', 'walk', 'look_up', 'look_down', 'look_left', 'look_right', 'stop'];
+    if (!validActions.includes(action)) {
+      throw new Error(`Invalid action. Must be one of: ${validActions.join(', ')}`);
+    }
+    const response = await this.client.request('/api/ai-control-player', { action, duration, speed });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async aiGetPlayerState(includeNearby: boolean = true, nearbyRadius: number = 50) {
+    const response = await this.client.request('/api/ai-get-player-state', { includeNearby, nearbyRadius });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async aiInteractWithObject(objectPath: string, action: string, playerIndex: number = 1) {
+    if (!objectPath || !action) {
+      throw new Error('objectPath and action are required for ai_interact_with_object');
+    }
+    const validActions = ['click', 'touch', 'activate', 'proximity', 'hover'];
+    if (!validActions.includes(action)) {
+      throw new Error(`Invalid action. Must be one of: ${validActions.join(', ')}`);
+    }
+    const response = await this.client.request('/api/ai-interact-with-object', { objectPath, action, playerIndex });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async aiTeleportPlayer(position: { x: number; y: number; z: number }, rotation?: { x: number; y: number; z: number }, playerIndex: number = 1) {
+    if (!position || typeof position.x !== 'number' || typeof position.y !== 'number' || typeof position.z !== 'number') {
+      throw new Error('Valid position with x, y, z is required for ai_teleport_player');
+    }
+    const response = await this.client.request('/api/ai-teleport-player', { position, rotation, playerIndex });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async getGameState(scope: string = 'all', maxResults: number = 50) {
+    const validScopes = ['all', 'players', 'npcs', 'projectiles', 'physics'];
+    if (!validScopes.includes(scope)) {
+      throw new Error(`Invalid scope. Must be one of: ${validScopes.join(', ')}`);
+    }
+    const response = await this.client.request('/api/get-game-state', { scope, maxResults });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async captureDebugLogs(type: string = 'all', maxLines: number = 100, sinceTimestamp?: number) {
+    const validTypes = ['all', 'errors', 'warnings', 'print', 'custom'];
+    if (!validTypes.includes(type)) {
+      throw new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+    }
+    const response = await this.client.request('/api/capture-debug-logs', { type, maxLines, sinceTimestamp });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async openDebugLogStream(type: string = 'all') {
+    const validTypes = ['all', 'errors', 'warnings', 'print', 'custom'];
+    if (!validTypes.includes(type)) {
+      throw new Error(`Invalid type. Must be one of: ${validTypes.join(', ')}`);
+    }
+    this.cleanupDebugLogStreams();
+    const stream: DebugLogStreamCursor = {
+      id: this.nextDebugLogStreamId(),
+      type,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      seenKeys: [],
+    };
+    this.debugLogStreams.set(stream.id, stream);
+    return this.asToolResult({
+      cursorId: stream.id,
+      type,
+      createdAt: stream.createdAt,
+    });
+  }
+
+  async pollDebugLogStream(cursorId: string, maxLines: number = 100) {
+    if (!cursorId) {
+      throw new Error('cursorId is required for poll_debug_log_stream');
+    }
+    const stream = this.debugLogStreams.get(cursorId);
+    if (!stream) {
+      throw new Error(`Unknown debug log cursor: ${cursorId}`);
+    }
+    const response = await this.client.request('/api/capture-debug-logs', {
+      type: stream.type,
+      maxLines,
+      sinceTimestamp: stream.lastTimestamp,
+    });
+    const logs = Array.isArray(response?.logs) ? response.logs : [];
+    const seenKeys = new Set(stream.seenKeys);
+    const freshLogs = logs.filter((entry: any) => {
+      const key = this.makeDebugLogKey(entry);
+      if (seenKeys.has(key)) {
+        return false;
+      }
+      seenKeys.add(key);
+      return true;
+    });
+    if (freshLogs.length > 0) {
+      const last = freshLogs[freshLogs.length - 1];
+      if (typeof last?.timestamp === 'number') {
+        stream.lastTimestamp = last.timestamp;
+      }
+    }
+    stream.seenKeys = [...seenKeys].slice(-200);
+    stream.updatedAt = Date.now();
+    return this.asToolResult({
+      cursorId: stream.id,
+      type: stream.type,
+      count: freshLogs.length,
+      logs: freshLogs,
+      lastTimestamp: stream.lastTimestamp ?? null,
+    });
+  }
+
+  async closeDebugLogStream(cursorId: string) {
+    if (!cursorId) {
+      throw new Error('cursorId is required for close_debug_log_stream');
+    }
+    const existed = this.debugLogStreams.delete(cursorId);
+    return this.asToolResult({
+      success: existed,
+      cursorId,
+    });
+  }
+
+  async getRuntimeErrors(clearAfter: boolean = false) {
+    const response = await this.client.request('/api/get-runtime-errors', { clearAfter });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async executeTestSequence(steps: Array<Record<string, any>>, stopOnError: boolean = true) {
+    if (!Array.isArray(steps) || steps.length === 0) {
+      throw new Error('steps array is required for execute_test_sequence');
+    }
+    const response = await this.client.request('/api/execute-test-sequence', { steps, stopOnError });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async watchPropertyChanges(instancePath: string, properties: string[], duration: number = 30) {
+    if (!instancePath || !Array.isArray(properties) || properties.length === 0) {
+      throw new Error('instancePath and properties array are required for watch_property_changes');
+    }
+    const response = await this.client.request('/api/watch-property-changes', { instancePath, properties, duration });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async getPerformanceMetrics(category: string = 'all') {
+    const validCategories = ['all', 'fps', 'memory', 'network', 'physics', 'instances'];
+    if (!validCategories.includes(category)) {
+      throw new Error(`Invalid category. Must be one of: ${validCategories.join(', ')}`);
+    }
+    const response = await this.client.request('/api/get-performance-metrics', { category });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async capturePerformanceSnapshot(category: string = 'all', sampleCount: number = 3, intervalMs: number = 250) {
+    const validCategories = ['all', 'fps', 'memory', 'network', 'physics', 'instances'];
+    if (!validCategories.includes(category)) {
+      throw new Error(`Invalid category. Must be one of: ${validCategories.join(', ')}`);
+    }
+    const safeSampleCount = Math.max(1, Math.min(20, Math.trunc(sampleCount || 1)));
+    const safeIntervalMs = Math.max(0, Math.min(5000, Math.trunc(intervalMs || 0)));
+    const samples: Record<string, unknown>[] = [];
+
+    for (let i = 0; i < safeSampleCount; i += 1) {
+      const sample = await this.client.request('/api/get-performance-metrics', { category });
+      samples.push(sample);
+      if (i < safeSampleCount - 1 && safeIntervalMs > 0) {
+        await this.sleep(safeIntervalMs);
+      }
+    }
+
+    return this.asToolResult({
+      category,
+      sampleCount: safeSampleCount,
+      intervalMs: safeIntervalMs,
+      samples,
+      summary: summarizePerformanceSamples(samples),
+    });
+  }
+
+  async inspectTerrain(region?: Record<string, number>, includeNavmesh: boolean = false) {
+    const response = await this.client.request('/api/inspect-terrain', { region, includeNavmesh });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async getNetworkStats(includePlayers: boolean = false) {
+    const response = await this.client.request('/api/get-network-stats', { includePlayers });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async simulateInput(inputType: string, target?: string, position?: { x: number; y: number }, keyCode?: string) {
+    if (!inputType) {
+      throw new Error('inputType is required for simulate_input');
+    }
+    const validTypes = ['keypress', 'keydown', 'keyup', 'mouse_click', 'mouse_move', 'mouse_down', 'mouse_up', 'touch_tap', 'touch_drag'];
+    if (!validTypes.includes(inputType)) {
+      throw new Error(`Invalid inputType. Must be one of: ${validTypes.join(', ')}`);
+    }
+    const response = await this.client.request('/api/simulate-input', { inputType, target, position, keyCode });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2)
+        }
+      ]
+    };
+  }
+
+  async parseUIReference(imageData: string, options?: {
+    detectText?: boolean;
+    detectButtons?: boolean;
+    minElementSize?: number;
+    colorClusterCount?: number;
+  }) {
+    if (!imageData) {
+      throw new Error('imageData is required for parse_ui_reference');
+    }
+    const result = await parseUIReference(imageData, options);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(result, null, 2)
+        }
+      ]
+    };
+  }
+
+  async parseAndGenerateUI(imageData: string, options?: {
+    detectText?: boolean;
+    detectButtons?: boolean;
+    minElementSize?: number;
+    colorClusterCount?: number;
+    scalingConfig?: any;
+  }): Promise<{ parseResult: any; generationResult: UIGenerationResult }> {
+    if (!imageData) {
+      throw new Error('imageData is required for parse_and_generate_ui');
+    }
+    const parseResult = await parseUIReference(imageData, options);
+
+    const uiContainer = this.convertParseResultToUIContainer(parseResult);
+    const scalingConfig = options?.scalingConfig || createDefaultScalingConfig();
+
+    const generationResult = await this.generateUI({
+      uiContainer,
+      scalingConfig,
+      metadata: {
+        sourceImageUrl: 'parsed',
+        parserVersion: '1.0.0',
+        generationTimestamp: Date.now(),
+      },
+    });
+
+    return { parseResult, generationResult };
+  }
+
+  private convertParseResultToUIContainer(parseResult: any): any {
+    const { hierarchy, colorPalette, metadata } = parseResult;
+
+    function mapColorToRGB(hex: string): { r: number; g: number; b: number } {
+      const cleanHex = hex.replace('#', '');
+      return {
+        r: parseInt(cleanHex.substring(0, 2), 16),
+        g: parseInt(cleanHex.substring(2, 4), 16),
+        b: parseInt(cleanHex.substring(4, 6), 16),
+      };
+    }
+
+    function convertNode(node: any, parentId?: string): any[] {
+      const elements: any[] = [];
+
+      const classMap: Record<string, string> = {
+        button: 'TextButton',
+        text: 'TextLabel',
+        image: 'ImageLabel',
+        container: 'Frame',
+        input: 'TextBox',
+        icon: 'ImageLabel',
+      };
+
+      const className = classMap[node.type] || 'Frame';
+      const colorRole = node.attributes?.colorRole;
+      const bgColor = colorRole
+        ? colorPalette.find((c: any) => c.role === colorRole) || colorPalette[0]
+        : colorPalette[0];
+
+      const element: any = {
+        id: node.id,
+        type: className,
+        name: node.name,
+        position: {
+          type: 'absolute',
+          x: Math.round(node.bounds.x),
+          y: Math.round(node.bounds.y),
+        },
+        size: {
+          type: 'absolute',
+          width: Math.round(node.bounds.width),
+          height: Math.round(node.bounds.height),
+        },
+        backgroundColor: bgColor ? mapColorToRGB(bgColor.hex) : { r: 50, g: 50, b: 50 },
+        zIndex: node.zIndex || 1,
+      };
+
+      if (parentId) {
+        element.parentId = parentId;
+      }
+
+      if (node.type === 'text' && node.attributes?.text) {
+        element.content = { text: node.attributes.text };
+        element.textStyle = {
+          font: 'GothamMedium',
+          textSize: 14,
+          textColor: { r: 255, g: 255, b: 255 },
+          textXAlignment: 'Center',
+          textYAlignment: 'Center',
+        };
+      }
+
+      if (node.type === 'button') {
+        element.buttonConfig = {
+          hoverColor: { r: 40, g: 180, b: 130 },
+          clickColor: { r: 35, g: 160, b: 110 },
+        };
+        element.corner = { radius: 8 };
+      }
+
+      elements.push(element);
+
+      if (node.children && node.children.length > 0) {
+        for (const child of node.children) {
+          elements.push(...convertNode(child, node.id));
+        }
+      }
+
+      return elements;
+    }
+
+    const elements = convertNode(hierarchy);
+
+    return {
+      id: 'root',
+      type: 'ScreenGui',
+      name: 'GeneratedUI',
+      displayOrder: 0,
+      enabled: true,
+      elements,
+    };
+  }
+
+  async generateUI(request: UIGenerationRequest): Promise<UIGenerationResult> {
+    if (!request?.uiContainer || !Array.isArray(request.uiContainer.elements)) {
+      throw new Error('uiContainer with elements array is required for generate_ui');
+    }
+    const response = await this.client.request('/api/generate-ui', {
+      uiContainer: request.uiContainer,
+      scalingConfig: request.scalingConfig || createDefaultScalingConfig(),
+      metadata: request.metadata || {},
+    });
+    if (!response || typeof response !== 'object') {
+      throw new Error('Invalid response from Studio plugin for generate_ui');
+    }
+    return {
+      success: Boolean(response.success),
+      rootInstancePath: String(response.rootInstancePath || ''),
+      createdInstances: Array.isArray(response.createdInstances) ? response.createdInstances : [],
+      errors: Array.isArray(response.errors) ? response.errors : undefined,
+      warnings: Array.isArray(response.warnings) ? response.warnings : undefined,
+    };
+  }
+
+  async previewUI(request: UIGenerationRequest): Promise<UIPreviewData> {
+    if (!request?.uiContainer || !Array.isArray(request.uiContainer.elements)) {
+      throw new Error('uiContainer with elements array is required for preview_ui');
+    }
+    const container = request.uiContainer;
+    const elementCount = this.countUIElements(container.elements);
+    const animationsCount = this.countUIAnimations(container.elements);
+    const estimatedComplexity = this.estimateUIComplexity(elementCount, animationsCount, container.elements);
+    return {
+      containerJson: JSON.stringify(container, null, 2),
+      elementCount,
+      estimatedComplexity,
+      animationsCount,
+    };
+  }
+
+  private countUIElements(elements: any[]): number {
+    let count = 0;
+    for (const el of elements) {
+      count += 1;
+      if (el.elements) {
+        count += this.countUIElements(el.elements);
+      }
+    }
+    return count;
+  }
+
+  private countUIAnimations(elements: any[]): number {
+    let count = 0;
+    for (const el of elements) {
+      if (el.animations) {
+        count += el.animations.length;
+      }
+      if (el.elements) {
+        count += this.countUIAnimations(el.elements);
+      }
+    }
+    return count;
+  }
+
+  private estimateUIComplexity(elementCount: number, animationsCount: number, elements: any[]): 'simple' | 'medium' | 'complex' {
+    let maxNesting = 0;
+    for (const el of elements) {
+      const nesting = this.getUINestingDepth(el);
+      maxNesting = Math.max(maxNesting, nesting);
+    }
+    const complexityScore = elementCount + animationsCount * 2 + maxNesting * 3;
+    if (complexityScore < 20) return 'simple';
+    if (complexityScore < 50) return 'medium';
+    return 'complex';
+  }
+
+  private getUINestingDepth(element: any, depth: number = 0): number {
+    let maxChildDepth = depth;
+    if (element.elements) {
+      for (const child of element.elements) {
+        maxChildDepth = Math.max(maxChildDepth, this.getUINestingDepth(child, depth + 1));
+      }
+    }
+    return maxChildDepth;
   }
 }

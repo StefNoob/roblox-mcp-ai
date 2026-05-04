@@ -1,18 +1,20 @@
+import { jest } from '@jest/globals';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import { StudioHttpClient } from '../tools/studio-client.js';
 
 describe('checkScriptDrift', () => {
   let tempDir: string;
   let tools: RobloxStudioTools;
-  let studioRequest: jest.Mock;
+  let studioRequest: jest.MockedFunction<StudioHttpClient['request']>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), 'roblox-mcp-drift-'));
     tools = new RobloxStudioTools(new BridgeService());
-    studioRequest = jest.fn();
+    studioRequest = jest.fn<StudioHttpClient['request']>();
     (tools as any).client = {
       request: studioRequest,
     };
@@ -116,7 +118,7 @@ describe('checkScriptDrift', () => {
     const localFile = path.join(tempDir, 'Chunked.server.luau');
 
     await writeFile(localFile, studioSource, 'utf8');
-    studioRequest.mockImplementation(async (_endpoint: string, payload: Record<string, unknown>) => {
+    studioRequest.mockImplementation(async (_endpoint, payload: any) => {
       if (payload.fullSource === true) {
         return {
           source: truncatedSource,

@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import type { PersistedStructureMapSnapshot } from '../tools/structure-map-cache.js';
@@ -178,8 +179,8 @@ describe('AI-first architecture and quality tools', () => {
       ].join('\n'),
     };
 
-    (tools as any).ensureStructureMapSnapshot = jest.fn().mockResolvedValue(snapshot);
-    (tools as any).readFullScriptSource = jest.fn(async (instancePath: string) => ({
+    jest.spyOn(tools as any, 'ensureStructureMapSnapshot').mockResolvedValue(snapshot);
+    jest.spyOn(tools as any, 'readFullScriptSource').mockImplementation(async (instancePath: any) => ({
       source: sourceByPath[instancePath] || '--!strict\nreturn {}',
     }));
 
@@ -197,5 +198,71 @@ describe('AI-first architecture and quality tools', () => {
         expect.objectContaining({ scriptPath: 'game.ServerScriptService.Combat.Controller' }),
       ]),
     );
+  });
+
+  test('Token limit stress testing with large synthetic snapshot', () => {
+    const largeSnapshot: PersistedStructureMapSnapshot = {
+      placeId: 777,
+      placeName: 'Massive Test Place',
+      version: 1,
+      updatedAt: 1,
+      roots: ['game.ServerScriptService'],
+      nodesByPath: {},
+      scriptInventory: [],
+      summaryIndex: {},
+    };
+
+    for (let i = 0; i < 6000; i++) {
+      const path = `game.ServerScriptService.Script${i}`;
+      largeSnapshot.nodesByPath[path] = {
+        path,
+        name: `Script${i}`,
+        className: 'Script',
+        hasSource: true,
+        scriptType: 'Script',
+        sourceHash: `hash${i}`,
+        subsystem: i % 2 === 0 ? 'SysA' : 'SysB',
+      };
+      largeSnapshot.scriptInventory.push(path);
+      largeSnapshot.summaryIndex[path] = {
+        path,
+        sourceHash: `hash${i}`,
+        summaryShort: 'Short summary',
+        summaryLong: 'A very long and detailed summary to take up more tokens and test the truncating logic thoroughly.',
+        purpose: 'Token padding',
+        exports: ['start'],
+        dependencies: [],
+        servicesUsed: ['Players'],
+        sideEffects: [],
+        subsystem: i % 2 === 0 ? 'SysA' : 'SysB',
+        updatedAt: 1,
+      };
+    }
+
+    const start = Date.now();
+    const report = analyzeArchitectureSnapshot(largeSnapshot, {
+      limit: 100,
+    });
+    
+    expect(report.summary.scriptCount).toBe(100);
+    expect(report.subsystems.length).toBeGreaterThan(0);
+    expect(Date.now() - start).toBeLessThan(5000);
+  });
+
+  test('Prompt Structure Validation', async () => {
+    const tools = new RobloxStudioTools(new BridgeService());
+    const snapshot = createSnapshot();
+    jest.spyOn(tools as any, 'ensureStructureMapSnapshot').mockResolvedValue(snapshot);
+    jest.spyOn(tools as any, 'readFullScriptSource').mockImplementation(async () => ({ source: '--!strict\nreturn {}' }));
+
+    const architectureRaw = await tools.analyzeProjectArchitecture({ subsystem: 'Combat' });
+    const content = architectureRaw.content[0].text;
+    
+    expect(() => JSON.parse(content)).not.toThrow();
+    
+    const parsed = JSON.parse(content);
+    expect(parsed).toHaveProperty('summary');
+    expect(parsed).toHaveProperty('subsystems');
+    expect(parsed).toHaveProperty('risks');
   });
 });

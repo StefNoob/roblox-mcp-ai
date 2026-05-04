@@ -1,11 +1,14 @@
+import { jest } from '@jest/globals';
 import { readFile } from 'fs/promises';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import { StudioHttpClient } from '../tools/studio-client.js';
 
 describe('P0 token optimization contracts', () => {
   test('getInstanceProperties omits script source unless explicitly requested', async () => {
     const tools = new RobloxStudioTools(new BridgeService());
-    const studioRequest = jest.fn().mockResolvedValue({ ok: true });
+    const studioRequest: jest.MockedFunction<StudioHttpClient['request']> =
+      jest.fn<StudioHttpClient['request']>().mockResolvedValue({ ok: true });
     (tools as any).client = { request: studioRequest };
 
     await tools.getInstanceProperties('game.ServerScriptService.Main');

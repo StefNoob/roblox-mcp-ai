@@ -1,10 +1,23 @@
+import { mkdtemp, rm } from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { summarizeScriptSource } from '../tools/script-summary';
 import { StructureMapCache, mergeSummaryIntoSnapshot } from '../tools/structure-map-cache';
 import type { PersistedStructureMapSnapshot } from '../tools/structure-map-cache';
 
 describe('Structure map cache and script summaries', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), 'roblox-mcp-structure-cache-'));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
   test('persists and reloads structure map data by place id', async () => {
-    const cache = new StructureMapCache(process.cwd());
+    const cache = new StructureMapCache(tempDir);
     const placeId = 123456;
     const snapshot: PersistedStructureMapSnapshot = {
       placeId,
@@ -86,5 +99,24 @@ describe('Structure map cache and script summaries', () => {
     expect(summary.summaryShort).toContain('EnemyBrain');
     expect(summary.dependencies).toContain('script.Parent.Util');
     expect(summary.servicesUsed).toEqual(expect.arrayContaining(['Players', 'ReplicatedStorage']));
+  });
+
+  test('persists and reloads full script source cache entries', async () => {
+    const cache = new StructureMapCache(tempDir);
+    const entry = {
+      instancePath: 'game.ServerScriptService.Main',
+      className: 'ModuleScript',
+      name: 'Main',
+      source: 'print("cached")\nreturn true\n',
+      sourceHash: '4f9f2cab',
+      sourceLength: 28,
+      lineCount: 2,
+      updatedAt: 123,
+    };
+
+    await (cache as any).saveScriptSource(entry);
+    const loaded = await (cache as any).loadScriptSource(entry.instancePath);
+
+    expect(loaded).toMatchObject(entry);
   });
 });

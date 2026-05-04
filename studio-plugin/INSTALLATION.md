@@ -8,7 +8,7 @@ The Roblox Studio MCP plugin is the bridge between your AI assistant and Studio.
 
 ### Method 1: GitHub Release (Recommended)
 
-1. Download [`MCPPlugin.rbxmx`](https://github.com/boshyxd/robloxstudio-mcp/releases/latest/download/MCPPlugin.rbxmx) from the latest release
+1. Download [`MCPPlugin.rbxmx`](https://github.com/aaronaalmendarez/roblox-mcp/releases/latest/download/MCPPlugin.rbxmx) from the latest release
 2. Save to your plugins folder:
 
    | OS          | Path                             |
@@ -30,7 +30,7 @@ Then copy `studio-plugin/MCPPlugin.rbxmx` to your plugins folder and restart Stu
 
 ### Method 3: Save as Local Plugin
 
-1. Open [`plugin.server.luau`](https://github.com/boshyxd/robloxstudio-mcp/blob/main/studio-plugin/plugin.server.luau) on GitHub
+1. Open [`studio-plugin/MCPPlugin.rbxmx`](https://github.com/aaronaalmendarez/roblox-mcp/blob/main/studio-plugin/MCPPlugin.rbxmx) on GitHub
 2. Copy the entire file contents
 3. In Studio → create a new **Script** in **ServerScriptService**
 4. Paste the code
@@ -64,12 +64,12 @@ Set up your MCP client to launch the server. Quick options:
 
 **Claude Code:**
 ```bash
-claude mcp add robloxstudio -- npx robloxstudio-mcp
+claude mcp add robloxstudio -- npx -y @aaronalm19/roblox-mcp@latest
 ```
 
 **Gemini CLI:**
 ```bash
-gemini mcp add robloxstudio npx --trust -- -y robloxstudio-mcp
+gemini mcp add robloxstudio npx --trust -- -y @aaronalm19/roblox-mcp@latest
 ```
 
 **Generic JSON config:**
@@ -78,7 +78,7 @@ gemini mcp add robloxstudio npx --trust -- -y robloxstudio-mcp
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "npx",
-      "args": ["-y", "robloxstudio-mcp@latest"]
+      "args": ["-y", "@aaronalm19/roblox-mcp@latest"]
     }
   }
 }
@@ -93,7 +93,7 @@ Wrap with `cmd`:
 ```json
 {
   "command": "cmd",
-  "args": ["/c", "npx", "-y", "robloxstudio-mcp@latest"]
+  "args": ["/c", "npx", "-y", "@aaronalm19/roblox-mcp@latest"]
 }
 ```
 </details>

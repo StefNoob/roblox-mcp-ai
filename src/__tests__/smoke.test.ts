@@ -61,7 +61,7 @@ describe('Smoke Tests - Connection Fixes', () => {
 
     expect(app.isPluginConnected()).toBe(false);
 
-    await request(app).post('/ready').expect(200);
+    await request(app).post('/ready').send({ pluginInstanceId: 'test', sessionId: 'test' }).expect(200);
     expect(app.isPluginConnected()).toBe(true);
 
     await request(app).post('/disconnect').expect(200);

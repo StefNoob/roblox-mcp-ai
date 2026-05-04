@@ -44,6 +44,22 @@ npm run studio -- place list              # See all places
 npm run studio -- stop                    # Kill all processes
 ```
 
+## 2.5 Token-Light Agent Start
+
+If your MCP host or agent has limited context, start with [`AGENT_LITE.md`](AGENT_LITE.md) first and open this file only when you need the full operator guide.
+
+Default discovery order:
+
+1. `get_place_info`
+2. `get_structure_map_summary`
+3. `query_structure_map`
+4. `get_script_inventory` or `get_subsystem_summary`
+5. `explain_script_cached`
+6. `get_project_structure` only for targeted branches
+7. `get_script_source` only for scripts you actually need to inspect
+
+Prefer cache-backed structure tools over broad recursive scans.
+
 ### Why use the CLI?
 
 | Feature | Benefit |
@@ -199,12 +215,18 @@ Use MCP tools directly for:
 - Running arbitrary **Luau** (`execute_luau`)
 
 **Key tools:**
-- `get_project_structure` — explore the game tree
-- `get_script_source` / `get_script_snapshot` — read scripts
+- `get_structure_map_summary` — top-level cached project summary
+- `query_structure_map` — map-first path/class/subsystem discovery
+- `get_script_inventory` / `get_subsystem_summary` — cached script discovery
+- `explain_script_cached` — cached per-script summary
+- `get_project_structure` — expand a targeted branch only
+- `get_script_source` / `get_script_snapshot` — read script text only when needed
 - `set_script_source` / `edit_script_lines` / `batch_script_edits` — write scripts
 - `create_object` / `create_object_with_properties` — make instances
 - `set_property` / `set_attribute` / `add_tag` — modify instances
 - `execute_luau` — run any code in Studio edit context
+
+`get_instance_properties` does not need to include `Source` during discovery. Request script text explicitly only when the task requires it.
 
 ---
 

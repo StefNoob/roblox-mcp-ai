@@ -1,5 +1,13 @@
 const ScriptEditorService = game.GetService("ScriptEditorService");
 
+function arrayCount<T>(items: T[]): number {
+	let count = 0;
+	for (const _item of items) {
+		count += 1;
+	}
+	return count;
+}
+
 function safeCall<T>(func: (...args: never[]) => T, ...args: never[]): T | undefined {
 	const [success, result] = pcall(func, ...args);
 	if (success) {
@@ -67,11 +75,111 @@ function splitLines(source: string): LuaTuple<[string[], boolean]> {
 		}
 	}
 
-	if (lines.size() === 0) {
+	if (arrayCount(lines) === 0) {
 		lines.push("");
 	}
 
 	return [lines, endsWithNewline] as unknown as LuaTuple<[string[], boolean]>;
+}
+
+function normalizeLineEndings(source: string): string {
+	return ((source ?? "") as string).gsub("\r\n", "\n")[0].gsub("\r", "\n")[0];
+}
+
+function countLines(source: string): number {
+	const normalized = normalizeLineEndings(source);
+	if (normalized.size() === 0) {
+		return 1;
+	}
+
+	let lineCount = 0;
+	let searchStart = 1;
+	while (true) {
+		const [newlinePos] = string.find(normalized, "\n", searchStart, true);
+		if (newlinePos === undefined) {
+			break;
+		}
+		lineCount += 1;
+		searchStart = newlinePos + 1;
+	}
+
+	if (normalized.sub(-1) !== "\n") {
+		lineCount += 1;
+	}
+
+	return math.max(1, lineCount);
+}
+
+function findLineStart(normalized: string, targetLine: number): number | undefined {
+	if (targetLine <= 1) {
+		return 1;
+	}
+
+	let currentLine = 1;
+	let searchStart = 1;
+	while (currentLine < targetLine) {
+		const [newlinePos] = string.find(normalized, "\n", searchStart, true);
+		if (newlinePos === undefined) {
+			return undefined;
+		}
+		searchStart = newlinePos + 1;
+		currentLine += 1;
+	}
+
+	return searchStart;
+}
+
+function extractLines(source: string, startLine?: number, endLine?: number) {
+	const normalized = normalizeLineEndings(source);
+	const totalLineCount = countLines(normalized);
+	const hasTrailingNewline = normalized.sub(-1) === "\n";
+	const actualStartLine = math.max(1, startLine ?? 1);
+	const actualEndLine = math.min(totalLineCount, endLine ?? totalLineCount);
+
+	if (actualStartLine > totalLineCount || actualEndLine < actualStartLine) {
+		return {
+			source: "",
+			lineCount: totalLineCount,
+			startLine: actualStartLine,
+			endLine: actualEndLine,
+		};
+	}
+
+	const sliceStart = findLineStart(normalized, actualStartLine);
+	if (sliceStart === undefined) {
+		return {
+			source: "",
+			lineCount: totalLineCount,
+			startLine: actualStartLine,
+			endLine: actualEndLine,
+		};
+	}
+
+	const afterSliceStart = findLineStart(normalized, actualEndLine + 1);
+	let extracted = afterSliceStart !== undefined
+		? string.sub(normalized, sliceStart, afterSliceStart - 2)
+		: string.sub(normalized, sliceStart);
+
+	if (hasTrailingNewline && actualEndLine === totalLineCount && extracted.sub(-1) !== "\n") {
+		extracted += "\n";
+	}
+
+	return {
+		source: extracted,
+		lineCount: totalLineCount,
+		startLine: actualStartLine,
+		endLine: actualEndLine,
+	};
+}
+
+function fnv1a32(source: string): string {
+	let hash = 0x811c9dc5;
+	for (let index = 1; index <= source.size(); index++) {
+		const byte = string.byte(source, index)[0] ?? 0;
+		hash = bit32.bxor(hash, byte);
+		hash = (hash * 0x01000193) % 4294967296;
+	}
+	return string.format("%08x", hash);
 }
 
 function joinLines(lines: string[], hadTrailingNewline: boolean): string {
@@ -105,8 +213,8 @@ function convertPropertyValue(instance: Instance, propertyName: string, property
 		const arr = propertyValue as unknown[];
 		const tbl = propertyValue as Record<string, unknown>;
 
-		if (typeIs(arr, "table") && (arr as defined[]).size() > 0) {
-			const len = (arr as defined[]).size();
+		if (typeIs(arr, "table") && arrayCount(arr as defined[]) > 0) {
+			const len = arrayCount(arr as defined[]);
 
 			if (len === 3) {
 				const prop = propertyName.lower();
@@ -295,7 +403,7 @@ function compareVersions(v1: string, v2: string): number {
 
 	const p1 = parseVersion(v1);
 	const p2 = parseVersion(v2);
-	const maxLen = math.max(p1.size(), p2.size());
+	const maxLen = math.max(arrayCount(p1), arrayCount(p2));
 	for (let i = 0; i < maxLen; i++) {
 		const n1 = p1[i] ?? 0;
 		const n2 = p2[i] ?? 0;
@@ -310,6 +418,10 @@ export = {
 	getInstancePath,
 	getInstanceByPath,
 	splitLines,
+	normalizeLineEndings,
+	countLines,
+	extractLines,
+	fnv1a32,
 	joinLines,
 	readScriptSource,
 	convertPropertyValue,

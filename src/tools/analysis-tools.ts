@@ -3,6 +3,7 @@ import type {
   ScriptSummaryRecord,
   StructureMapNodeRecord,
 } from './structure-map-cache.js';
+import type { EnhancedScriptSummaryRecord } from './script-summary.js';
 
 export type AnalysisSeverity = 'low' | 'medium' | 'high';
 
@@ -72,6 +73,17 @@ export interface ScriptQualityInput {
   dependencies: string[];
   servicesUsed: string[];
   sideEffects: string[];
+  patterns?: string[];
+  complexity?: {
+    cyclomaticApprox: number;
+    nestingDepth: number;
+    avgFunctionLength: number;
+  };
+  apiSurface?: string[];
+  stateAccess?: string[];
+  lifecycleHooks?: string[];
+  crossScriptCalls?: string[];
+  eventHandlers?: string[];
 }
 
 export interface QualityFinding {
@@ -101,13 +113,21 @@ export interface ScriptQualityReport {
     serviceCount: number;
     sideEffectCount: number;
     strictMode: boolean;
+    cyclomaticApprox: number;
+    nestingDepth: number;
+    avgFunctionLength: number;
   };
+  patterns: string[];
+  apiSurface: string[];
+  stateAccess: string[];
+  lifecycleHooks: string[];
+  eventHandlers: string[];
   findings: QualityFinding[];
 }
 
 type ScriptSnapshot = {
   node: StructureMapNodeRecord;
-  summary?: ScriptSummaryRecord;
+  summary?: ScriptSummaryRecord | EnhancedScriptSummaryRecord;
 };
 
 function normalizeString(value?: string | null) {
@@ -186,17 +206,44 @@ function hotspotScore(script: ScriptSnapshot) {
   const serviceCount = script.summary?.servicesUsed?.length || 0;
   const sideEffectCount = script.summary?.sideEffects?.length || 0;
   const scriptWeight = script.node.scriptType === 'ModuleScript' ? 0 : 2;
-  return (dependencyCount * 4) + (serviceCount * 3) + (sideEffectCount * 2) + scriptWeight;
+  const enhanced = script.summary as EnhancedScriptSummaryRecord | undefined;
+  const complexityBonus = enhanced?.complexity
+    ? Math.min(enhanced.complexity.cyclomaticApprox / 5, 5)
+    : 0;
+  return (dependencyCount * 4) + (serviceCount * 3) + (sideEffectCount * 2) + scriptWeight + complexityBonus;
 }
 
 function architectureRisks(scripts: ScriptSnapshot[]): ArchitectureRisk[] {
   const risks: ArchitectureRisk[] = [];
+  const pathToDeps = new Map<string, string[]>();
 
+  for (const script of scripts) {
+    pathToDeps.set(script.node.path, script.summary?.dependencies || []);
+  }
+
+  // Detect circular dependencies
+  for (const script of scripts) {
+    const deps = pathToDeps.get(script.node.path) || [];
+    for (const dep of deps) {
+      const depDeps = pathToDeps.get(dep) || [];
+      if (depDeps.includes(script.node.path)) {
+        risks.push({
+          category: 'circular-dependency',
+          severity: 'high',
+          path: script.node.path,
+          reason: `${script.node.path} and ${dep} have a circular dependency. Consider merging or introducing an intermediate abstraction.`,
+        });
+      }
+    }
+  }
+
+  // Detect god objects (high coupling AND high complexity)
   for (const script of scripts) {
     const dependencyCount = script.summary?.dependencies?.length || 0;
     const serviceCount = script.summary?.servicesUsed?.length || 0;
     const sideEffects = script.summary?.sideEffects || [];
     const path = script.node.path;
+    const enhanced = script.summary as EnhancedScriptSummaryRecord | undefined;
 
     if (dependencyCount >= 2) {
       risks.push({
@@ -214,6 +261,18 @@ function architectureRisks(scripts: ScriptSnapshot[]): ArchitectureRisk[] {
         reason: `${path} touches ${serviceCount} Roblox services, which is a signal for boundary drift.`,
       });
     }
+
+    // God object detection: high coupling + many services + many side effects
+    const isGodObject = dependencyCount >= 6 && serviceCount >= 4 && sideEffects.length >= 4;
+    if (isGodObject) {
+      risks.push({
+        category: 'god-object',
+        severity: 'high',
+        path,
+        reason: `${path} is a god object with ${dependencyCount} deps, ${serviceCount} services, ${sideEffects.length} side effects. Consider splitting into focused modules.`,
+      });
+    }
+
     if (sideEffects.includes('infinite-loop')) {
       risks.push({
         category: 'runtime-loop',
@@ -230,11 +289,84 @@ function architectureRisks(scripts: ScriptSnapshot[]): ArchitectureRisk[] {
         reason: `${path} does not have a fresh cached summary, so downstream AI reasoning may have degraded context.`,
       });
     }
+    if (enhanced?.complexity && enhanced.complexity.nestingDepth >= 5) {
+      risks.push({
+        category: 'deep-nesting',
+        severity: enhanced.complexity.nestingDepth >= 7 ? 'high' : 'medium',
+        path,
+        reason: `${path} has nested depth ${enhanced.complexity.nestingDepth}, which makes the control flow harder to follow.`,
+      });
+    }
   }
 
   return risks
     .sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity) || a.path.localeCompare(b.path))
     .slice(0, 12);
+}
+
+function computeCohesionScore(scripts: ScriptSnapshot[], pathToDeps: Map<string, string[]>): Map<string, number> {
+  const scores = new Map<string, number>();
+  
+  for (const script of scripts) {
+    const path = script.node.path;
+    const deps = pathToDeps.get(path) || [];
+    if (deps.length < 2) {
+      scores.set(path, 1.0); // Perfect cohesion or trivial module
+      continue;
+    }
+
+    // Check if all dependencies serve a similar purpose
+    const depSubsystems = new Set(deps.map(dep => {
+      const depScript = scripts.find(s => s.node.path === dep);
+      return depScript?.node.subsystem || depScript?.summary?.subsystem || '';
+    }).filter(Boolean));
+
+    const subsystem = script.node.subsystem || script.summary?.subsystem || '';
+    
+    // Cohesion is higher when all deps belong to same subsystem
+    const sameSubsystemDeps = [...depSubsystems].filter(s => s === subsystem).length;
+    const cohesion = depSubsystems.size === 0 
+      ? 1.0 
+      : 0.3 + (0.7 * (sameSubsystemDeps / depSubsystems.size));
+    
+    scores.set(path, Math.round(cohesion * 100) / 100);
+  }
+
+  return scores;
+}
+
+function computePagerankHotspots(scripts: ScriptSnapshot[]): Array<{ path: string; score: number }> {
+  const pathSet = new Set(scripts.map(s => s.node.path));
+  const adj = new Map<string, Set<string>>();
+  
+  for (const script of scripts) {
+    const deps = script.summary?.dependencies || [];
+    adj.set(script.node.path, new Set(deps.filter(d => pathSet.has(d))));
+  }
+
+  const paths = [...pathSet];
+  const damping = 0.85;
+  const iterations = 20;
+  let pr = new Map(paths.map(p => [p, 1 / paths.length]));
+
+  for (let i = 0; i < iterations; i++) {
+    const newPr = new Map<string, number>();
+    for (const path of paths) {
+      let sum = 0;
+      for (const [otherPath, otherDeps] of adj) {
+        if (otherDeps.has(path)) {
+          const outDegree = otherDeps.size || 1;
+          sum += (pr.get(otherPath) || 0) / outDegree;
+        }
+      }
+      newPr.set(path, (1 - damping) / paths.length + damping * sum);
+    }
+    pr = newPr;
+  }
+
+  return paths
+    .map(path => ({ path, score: Math.round((pr.get(path) || 0) * 1000) }))
+    .sort((a, b) => b.score - a.score);
 }
 
 function detectEntrypoints(scripts: ScriptSnapshot[]) {
@@ -386,7 +518,7 @@ export function analyzeScriptQuality(input: ScriptQualityInput): ScriptQualityRe
       category: 'high-coupling',
       title: 'High dependency count',
       detail: `The script depends on ${dependencyCount} modules.`,
-      suggestion: 'Split orchestration from domain logic or introduce a smaller façade module.',
+      suggestion: 'Split orchestration from domain logic or introduce a smaller facade module.',
     });
   }
 
@@ -420,6 +552,60 @@ export function analyzeScriptQuality(input: ScriptQualityInput): ScriptQualityRe
     });
   }
 
+  // Enhanced findings from new metadata
+  if (input.complexity) {
+    if (input.complexity.cyclomaticApprox >= 15) {
+      pushFinding(findings, input, {
+        severity: input.complexity.cyclomaticApprox >= 25 ? 'high' : 'medium',
+        category: 'high-complexity',
+        title: 'High cyclomatic complexity',
+        detail: `Approximated cyclomatic complexity is ${input.complexity.cyclomaticApprox}.`,
+        suggestion: 'Extract helper functions to reduce branching paths.',
+      });
+    }
+    if (input.complexity.nestingDepth >= 5) {
+      pushFinding(findings, input, {
+        severity: input.complexity.nestingDepth >= 7 ? 'high' : 'medium',
+        category: 'deep-nesting',
+        title: 'Deep nesting detected',
+        detail: `Maximum nesting depth is ${input.complexity.nestingDepth}.`,
+        suggestion: 'Flatten nested control flow with early returns or guard clauses.',
+      });
+    }
+    if (input.complexity.avgFunctionLength >= 40) {
+      pushFinding(findings, input, {
+        severity: input.complexity.avgFunctionLength >= 60 ? 'medium' : 'low',
+        category: 'long-functions',
+        title: 'Long average function length',
+        detail: `Average function length is ${input.complexity.avgFunctionLength} lines.`,
+        suggestion: 'Break large functions into smaller, focused units.',
+      });
+    }
+  }
+
+  if (input.patterns && input.patterns.length === 0 && lines.length > 15) {
+    pushFinding(findings, input, {
+      severity: 'low',
+      category: 'no-recognizable-patterns',
+      title: 'No recognizable architectural patterns',
+      detail: 'The script does not match common Roblox architectural patterns (Knit, Component, etc.).',
+      suggestion: 'Consider adopting a lightweight framework for consistency.',
+    });
+  }
+
+  if (input.lifecycleHooks && input.lifecycleHooks.length === 0) {
+    // Only flag if it is a Script or LocalScript that probably should have lifecycle
+    if (input.scriptType === 'Script' || input.scriptType === 'LocalScript') {
+      pushFinding(findings, input, {
+        severity: 'low',
+        category: 'no-lifecycle-hooks',
+        title: 'No lifecycle hooks detected',
+        detail: 'The entrypoint script does not appear to handle PlayerAdded, CharacterAdded, or similar lifecycle events.',
+        suggestion: 'Review whether the script should react to player or character lifecycle.',
+      });
+    }
+  }
+
   const score = Math.max(0, 100 - findings.reduce((sum, finding) => sum + severityWeight(finding.severity), 0));
   const smellCategories = uniqueSorted(findings.map((finding) => finding.category));
   const refactorHints = uniqueSorted(findings.map((finding) => finding.suggestion)).slice(0, 6);
@@ -442,7 +628,15 @@ export function analyzeScriptQuality(input: ScriptQualityInput): ScriptQualityRe
       serviceCount,
       sideEffectCount,
       strictMode,
+      cyclomaticApprox: input.complexity?.cyclomaticApprox ?? 0,
+      nestingDepth: input.complexity?.nestingDepth ?? 0,
+      avgFunctionLength: input.complexity?.avgFunctionLength ?? 0,
     },
+    patterns: input.patterns || [],
+    apiSurface: input.apiSurface || [],
+    stateAccess: input.stateAccess || [],
+    lifecycleHooks: input.lifecycleHooks || [],
+    eventHandlers: input.eventHandlers || [],
     findings,
   };
 }

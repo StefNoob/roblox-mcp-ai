@@ -1,13 +1,15 @@
+import { jest } from '@jest/globals';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import { StudioHttpClient } from '../tools/studio-client.js';
 
 describe('script write safety', () => {
   let tools: RobloxStudioTools;
-  let studioRequest: jest.Mock;
+  let studioRequest: jest.MockedFunction<StudioHttpClient['request']>;
 
   beforeEach(() => {
     tools = new RobloxStudioTools(new BridgeService());
-    studioRequest = jest.fn();
+    studioRequest = jest.fn<StudioHttpClient['request']>();
     (tools as any).client = {
       request: studioRequest,
     };
@@ -38,7 +40,7 @@ describe('script write safety', () => {
   });
 
   test('fast write fallback uses set-script-source bridge instead of set-property', async () => {
-    studioRequest.mockImplementation(async (endpoint: string) => {
+    studioRequest.mockImplementation(async (endpoint) => {
       if (endpoint === '/api/set-script-source-fast') {
         throw new Error('Unknown endpoint: /api/set-script-source-fast');
       }
@@ -59,5 +61,48 @@ describe('script write safety', () => {
       '/api/set-property',
       expect.anything(),
     );
+  });
+
+  test('batch script edits fallback applies operations locally when plugin lacks endpoint', async () => {
+    studioRequest.mockImplementation(async (endpoint: string, payload?: any) => {
+      if (endpoint === '/api/get-script-source') {
+        return {
+          source: 'local a = 1\nprint(local a)\n',
+          lineCount: 2,
+          startLine: 1,
+          endLine: 2,
+          truncated: false,
+        };
+      }
+      if (endpoint === '/api/batch-script-edits') {
+        throw new Error('Unknown endpoint: /api/batch-script-edits');
+      }
+      if (endpoint === '/api/set-script-source') {
+        return {
+          success: true,
+          method: 'UpdateSourceAsync',
+          source: payload?.source,
+        };
+      }
+      throw new Error(`Unexpected endpoint: ${endpoint}`);
+    });
+
+    const response = await tools.batchScriptEdits(
+      'game.ServerScriptService.Main',
+      [
+        { op: 'replace', startLine: 1, endLine: 1, newContent: 'local a = 2' },
+        { op: 'insert', afterLine: 2, newContent: 'return a' },
+      ],
+    );
+
+    const result = JSON.parse(response.content[0].text);
+
+    expect(result.success).toBe(true);
+    expect(result.fallback).toBe(true);
+    expect(studioRequest).toHaveBeenCalledWith('/api/set-script-source', {
+      instancePath: 'game.ServerScriptService.Main',
+      source: 'local a = 2\nprint(local a)\nreturn a\n',
+      preferDirect: false,
+    });
   });
 });

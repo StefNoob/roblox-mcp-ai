@@ -16,5 +16,6 @@
     "rootDir": "src",
     "outDir": "out",
     "declaration": false
-  }
+  },
+  "exclude": ["src/**/*.test.ts"]
 }

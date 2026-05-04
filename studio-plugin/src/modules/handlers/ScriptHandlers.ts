@@ -4,13 +4,23 @@ import StructureMap from "../StructureMap";
 const ChangeHistoryService = game.GetService("ChangeHistoryService");
 const ScriptEditorService = game.GetService("ScriptEditorService");
 
-const { getInstancePath, getInstanceByPath, readScriptSource, splitLines, joinLines } = Utils;
+const {
+	getInstancePath,
+	getInstanceByPath,
+	readScriptSource,
+	splitLines,
+	joinLines,
+	extractLines,
+	countLines,
+	fnv1a32,
+} = Utils;
 
 function getScriptSource(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const startLine = requestData.startLine as number | undefined;
 	const endLine = requestData.endLine as number | undefined;
 	const fullSourceRequested = requestData.fullSource === true;
+	const includeNumberedSource = requestData.includeNumberedSource !== false;
 
 	if (!instancePath) return { error: "Instance path is required" };
 
@@ -22,62 +32,54 @@ function getScriptSource(requestData: Record<string, unknown>) {
 
 	const [success, result] = pcall(() => {
 		const fullSource = readScriptSource(instance);
-		const [lines, hasTrailingNewline] = splitLines(fullSource);
-		const totalLineCount = lines.size();
+		const fullSourceLineCount = countLines(fullSource);
 
 		let sourceToReturn = fullSource;
 		let returnedStartLine = 1;
-		let returnedEndLine = totalLineCount;
+		let returnedEndLine = fullSourceLineCount;
 
 		if (startLine !== undefined || endLine !== undefined) {
-			const actualStartLine = math.max(1, startLine ?? 1);
-			const actualEndLine = math.min(lines.size(), endLine ?? lines.size());
-
-			const selectedLines: string[] = [];
-			for (let i = actualStartLine; i <= actualEndLine; i++) {
-				selectedLines.push(lines[i - 1] ?? "");
-			}
-
-			sourceToReturn = selectedLines.join("\n");
-			if (hasTrailingNewline && actualEndLine === lines.size() && sourceToReturn.sub(-1) !== "\n") {
-				sourceToReturn += "\n";
-			}
-			returnedStartLine = actualStartLine;
-			returnedEndLine = actualEndLine;
+			const extracted = extractLines(fullSource, startLine, endLine);
+			sourceToReturn = extracted.source;
+			returnedStartLine = extracted.startLine;
+			returnedEndLine = extracted.endLine;
 		}
-
-		const numberedLines: string[] = [];
-		const linesToNumber = startLine !== undefined ? splitLines(sourceToReturn)[0] : lines;
-		const lineOffset = returnedStartLine - 1;
-		for (let i = 0; i < linesToNumber.size(); i++) {
-			numberedLines.push(`${i + 1 + lineOffset}: ${linesToNumber[i]}`);
-		}
-		const numberedSource = numberedLines.join("\n");
 
 		const resp: Record<string, unknown> = {
 			instancePath,
 			className: instance.ClassName,
 			name: instance.Name,
 			source: sourceToReturn,
-			numberedSource,
 			sourceLength: fullSource.size(),
-			lineCount: totalLineCount,
+			lineCount: fullSourceLineCount,
 			startLine: returnedStartLine,
 			endLine: returnedEndLine,
 			isPartial: startLine !== undefined || endLine !== undefined,
 			truncated: false,
 		};
 
-		if (!fullSourceRequested && startLine === undefined && endLine === undefined && fullSource.size() > 50000) {
-			const truncatedLines: string[] = [];
-			const truncatedNumberedLines: string[] = [];
-			const maxLines = math.min(1000, lines.size());
-			for (let i = 0; i < maxLines; i++) {
-				truncatedLines.push(lines[i]);
-				truncatedNumberedLines.push(`${i + 1}: ${lines[i]}`);
+		if (includeNumberedSource) {
+			const numberedLines: string[] = [];
+			const [linesToNumber] = splitLines(sourceToReturn);
+			const lineOffset = returnedStartLine - 1;
+			for (let i = 0; i < linesToNumber.size(); i++) {
+				numberedLines.push(`${i + 1 + lineOffset}: ${linesToNumber[i]}`);
 			}
-			resp.source = truncatedLines.join("\n");
-			resp.numberedSource = truncatedNumberedLines.join("\n");
+			resp.numberedSource = numberedLines.join("\n");
+		}
+
+		if (!fullSourceRequested && startLine === undefined && endLine === undefined && fullSource.size() > 50000) {
+			const maxLines = math.min(1000, fullSourceLineCount);
+			const extracted = extractLines(fullSource, 1, maxLines);
+			resp.source = extracted.source;
+			if (includeNumberedSource) {
+				const [truncatedLines] = splitLines(extracted.source);
+				const truncatedNumberedLines: string[] = [];
+				for (let i = 0; i < truncatedLines.size(); i++) {
+					truncatedNumberedLines.push(`${i + 1}: ${truncatedLines[i]}`);
+				}
+				resp.numberedSource = truncatedNumberedLines.join("\n");
+			}
 			resp.truncated = true;
 			resp.endLine = maxLines;
 			resp.note = "Script truncated to first 1000 lines. Use startLine/endLine parameters to read specific sections.";
@@ -86,6 +88,7 @@ function getScriptSource(requestData: Record<string, unknown>) {
 		if (instance.IsA("BaseScript")) {
 			resp.enabled = instance.Enabled;
 		}
+		StructureMap.touchScriptSummary(instancePath, fnv1a32(fullSource));
 		return resp;
 	});
 
@@ -96,11 +99,45 @@ function getScriptSource(requestData: Record<string, unknown>) {
 	}
 }
 
+function getScriptMetadata(requestData: Record<string, unknown>) {
+	const instancePath = requestData.instancePath as string;
+
+	if (!instancePath) return { error: "Instance path is required" };
+
+	const instance = getInstanceByPath(instancePath);
+	if (!instance) return { error: `Instance not found: ${instancePath}` };
+	if (!instance.IsA("LuaSourceContainer")) {
+		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
+	}
+
+	const [success, result] = pcall(() => {
+		const source = readScriptSource(instance);
+		const sourceHash = fnv1a32(source);
+		StructureMap.touchScriptSummary(instancePath, sourceHash);
+		return {
+			instancePath,
+			className: instance.ClassName,
+			name: instance.Name,
+			sourceLength: source.size(),
+			lineCount: countLines(source),
+			sourceHash,
+		};
+	});
+
+	if (success) {
+		return result;
+	}
+
+	return { error: `Failed to get script metadata: ${result}` };
+}
+
 function setScriptSource(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const newSource = requestData.source as string;
 
-	if (!instancePath || !newSource) return { error: "Instance path and source are required" };
+	if (!instancePath || newSource === undefined) {
+		return { error: "Instance path and source are required" };
+	}
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -147,38 +184,8 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		return directResult;
 	}
 
-	const [replaceSuccess, replaceResult] = pcall(() => {
-		const parent = instance.Parent;
-		const name = instance.Name;
-		const className = instance.ClassName;
-		const wasBaseScript = instance.IsA("BaseScript");
-		const enabled = wasBaseScript ? instance.Enabled : undefined;
-
-		const newScript = new Instance(className as keyof CreatableInstances) as LuaSourceContainer;
-		newScript.Name = name;
-		(newScript as unknown as { Source: string }).Source = sourceToSet;
-		if (wasBaseScript && enabled !== undefined) {
-			(newScript as BaseScript).Enabled = enabled;
-		}
-
-		newScript.Parent = parent;
-		instance.Destroy();
-		ChangeHistoryService.SetWaypoint(`Replace script: ${name}`);
-
-		return {
-			success: true,
-			instancePath: getInstancePath(newScript),
-			method: "replace",
-			message: "Script replaced successfully with new source",
-		};
-	});
-
-	if (replaceSuccess) {
-		StructureMap.markDirty("set-script-source");
-		return replaceResult;
-	}
 	return {
-		error: `Failed to set script source. UpdateSourceAsync failed: ${updateResult}. Direct assignment failed: ${directResult}. Replace method failed: ${replaceResult}`,
+		error: `Failed to set script source safely. UpdateSourceAsync failed: ${updateResult}. Direct assignment failed: ${directResult}`,
 	};
 }
 
@@ -188,7 +195,7 @@ function editScriptLines(requestData: Record<string, unknown>) {
 	const endLine = requestData.endLine as number;
 	let newContent = requestData.newContent as string;
 
-	if (!instancePath || !startLine || !endLine || !newContent) {
+	if (!instancePath || !startLine || !endLine || newContent === undefined) {
 		return { error: "Instance path, startLine, endLine, and newContent are required" };
 	}
 
@@ -238,7 +245,9 @@ function insertScriptLines(requestData: Record<string, unknown>) {
 	const afterLine = (requestData.afterLine as number) ?? 0;
 	let newContent = requestData.newContent as string;
 
-	if (!instancePath || !newContent) return { error: "Instance path and newContent are required" };
+	if (!instancePath || newContent === undefined) {
+		return { error: "Instance path and newContent are required" };
+	}
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -327,6 +336,7 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 
 export = {
 	getScriptSource,
+	getScriptMetadata,
 	setScriptSource,
 	editScriptLines,
 	insertScriptLines,

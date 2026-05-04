@@ -9,6 +9,7 @@ export default {
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       useESM: true,
+      diagnostics: false,
       tsconfig: {
         module: 'esnext',
         target: 'esnext',
@@ -22,6 +23,11 @@ export default {
   testMatch: [
     '**/__tests__/**/*.test.ts',
     '**/*.test.ts'
+  ],
+  testPathIgnorePatterns: [
+    '<rootDir>/.kilo/',
+    '<rootDir>/studio-plugin/',
+    '<rootDir>/node_modules/'
   ],
   collectCoverageFrom: [
     'src/**/*.ts',

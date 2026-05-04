@@ -1,14 +1,20 @@
-import { resolveServerHost } from '../server-config';
+import { getServerHostFallbacks, resolveServerHost } from "../server-config";
 
-describe('resolveServerHost', () => {
-  test('defaults to localhost for the MCP HTTP bridge', () => {
-    expect(resolveServerHost(undefined)).toBe('127.0.0.1');
-    expect(resolveServerHost('')).toBe('127.0.0.1');
-    expect(resolveServerHost('   ')).toBe('127.0.0.1');
-  });
+describe("resolveServerHost", () => {
+	test("defaults to localhost so plugin URL and server bind target stay aligned", () => {
+		expect(resolveServerHost(undefined)).toBe("localhost");
+	});
 
-  test('uses an explicit host override when provided', () => {
-    expect(resolveServerHost('0.0.0.0')).toBe('0.0.0.0');
-    expect(resolveServerHost('192.168.1.25')).toBe('192.168.1.25');
-  });
+	test("preserves an explicit host override", () => {
+		expect(resolveServerHost("127.0.0.1")).toBe("127.0.0.1");
+	});
+
+	test("adds IPv4 loopback fallback on Windows when localhost is the default host", () => {
+		expect(getServerHostFallbacks("localhost", "win32")).toEqual(["127.0.0.1"]);
+	});
+
+	test("does not add fallback for non-Windows platforms or explicit hosts", () => {
+		expect(getServerHostFallbacks("localhost", "linux")).toEqual([]);
+		expect(getServerHostFallbacks("127.0.0.1", "win32")).toEqual([]);
+	});
 });

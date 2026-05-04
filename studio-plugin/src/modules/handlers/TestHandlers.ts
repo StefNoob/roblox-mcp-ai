@@ -13,6 +13,8 @@ interface OutputEntry {
 }
 
 let testRunning = false;
+let stopRequested = false;
+let completed = false;
 let outputBuffer: OutputEntry[] = [];
 let logConnection: RBXScriptConnection | undefined;
 let testResult: unknown;
@@ -52,6 +54,14 @@ function cleanupStopListener() {
 	}
 }
 
+function cleanupPlaytestResources() {
+	if (logConnection) {
+		logConnection.Disconnect();
+		logConnection = undefined;
+	}
+	cleanupStopListener();
+}
+
 function startPlaytest(requestData: Record<string, unknown>) {
 	const mode = requestData.mode as string | undefined;
 
@@ -64,6 +74,8 @@ function startPlaytest(requestData: Record<string, unknown>) {
 	}
 
 	testRunning = true;
+	stopRequested = false;
+	completed = false;
 	outputBuffer = [];
 	testResult = undefined;
 	testError = undefined;
@@ -98,13 +110,9 @@ function startPlaytest(requestData: Record<string, unknown>) {
 			testError = tostring(result);
 		}
 
-		if (logConnection) {
-			logConnection.Disconnect();
-			logConnection = undefined;
-		}
 		testRunning = false;
-
-		cleanupStopListener();
+		completed = true;
+		cleanupPlaytestResources();
 	});
 
 	return { success: true, message: `Playtest started in ${mode} mode` };
@@ -115,6 +123,7 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 		return { error: "No test is currently running" };
 	}
 
+	stopRequested = true;
 	warn(STOP_SIGNAL);
 
 	return {
@@ -128,6 +137,8 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 function getPlaytestOutput(_requestData: Record<string, unknown>) {
 	return {
 		isRunning: testRunning,
+		stopRequested,
+		completed,
 		output: [...outputBuffer],
 		outputCount: outputBuffer.size(),
 		testResult: testResult !== undefined ? tostring(testResult) : undefined,

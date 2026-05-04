@@ -19,6 +19,12 @@ function escapeCdata(source) {
   return source.replace(/\]\]>/g, ']]]]><![CDATA[>');
 }
 
+function stripLeadingBom(source) {
+  return source
+    .replace(/^\uFEFF/, '')
+    .replace(/^\u00EF\u00BB\u00BF/, '');
+}
+
 function injectVersion(source) {
   return source.replace(/__VERSION__/g, VERSION);
 }
@@ -30,7 +36,7 @@ if (!existsSync(serverInitPath)) {
   process.exit(1);
 }
 
-const mainSource = injectVersion(readFileSync(serverInitPath, 'utf8'));
+const mainSource = stripLeadingBom(injectVersion(readFileSync(serverInitPath, 'utf8')));
 
 let refId = 1;
 
@@ -74,7 +80,7 @@ function buildModuleItems(dir, depth = 0) {
       const currentRef = refId;
 
       if (initFile) {
-        const moduleSource = injectVersion(readFileSync(initFile, 'utf8'));
+        const moduleSource = stripLeadingBom(injectVersion(readFileSync(initFile, 'utf8')));
         const childItems = buildModuleItems(fullPath, depth + 1);
         items += `
       ${'  '.repeat(depth)}<Item class="ModuleScript" referent="${currentRef}">
@@ -95,7 +101,7 @@ function buildModuleItems(dir, depth = 0) {
     } else if (isLuaFile(entry.name) && !INIT_FILENAMES.has(entry.name)) {
       const ext = entry.name.endsWith('.luau') ? '.luau' : '.lua';
       const moduleName = basename(entry.name, ext);
-      const moduleSource = injectVersion(readFileSync(fullPath, 'utf8'));
+      const moduleSource = stripLeadingBom(injectVersion(readFileSync(fullPath, 'utf8')));
       refId++;
       items += `
       ${'  '.repeat(depth)}<Item class="ModuleScript" referent="${refId}">

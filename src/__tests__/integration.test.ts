@@ -1,8 +1,14 @@
+import { jest } from '@jest/globals';
 import request from 'supertest';
 import { createHttpServer } from '../http-server';
 import { RobloxStudioTools } from '../tools/index';
 import { BridgeService } from '../bridge-service';
 import { Application } from 'express';
+
+const READY_PAYLOAD = {
+  pluginInstanceId: 'studio-a',
+  sessionId: 'studio-a',
+};
 
 describe('Integration Tests', () => {
   let app: Application & any;
@@ -16,7 +22,7 @@ describe('Integration Tests', () => {
   });
 
   afterEach(() => {
-
+    app.closeServerResources?.();
     bridge.clearAllPendingRequests();
   });
 
@@ -27,7 +33,7 @@ describe('Integration Tests', () => {
       expect(status.body.pluginConnected).toBe(false);
       expect(status.body.mcpServerActive).toBe(false);
 
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
 
       status = await request(app).get('/status').expect(200);
       expect(status.body.pluginConnected).toBe(true);
@@ -53,7 +59,7 @@ describe('Integration Tests', () => {
         pluginConnected: true
       });
 
-      await request(app).post('/disconnect').expect(200);
+      await request(app).post('/disconnect').send({ sessionId: 'studio-a' }).expect(200);
 
       status = await request(app).get('/status').expect(200);
       expect(status.body.pluginConnected).toBe(false);
@@ -64,7 +70,7 @@ describe('Integration Tests', () => {
   describe('Request/Response Flow', () => {
     test('should handle complete request/response cycle', async () => {
 
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
       app.setMCPServerActive(true);
 
       const mcpRequestPromise = bridge.sendRequest('/api/test-endpoint', {
@@ -104,7 +110,7 @@ describe('Integration Tests', () => {
 
     test('should handle error responses', async () => {
 
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
       app.setMCPServerActive(true);
 
       const mcpRequestPromise = bridge.sendRequest('/api/failing-endpoint', {});
@@ -128,32 +134,33 @@ describe('Integration Tests', () => {
   describe('Disconnect Recovery', () => {
     test('should handle disconnect and reconnect gracefully', async () => {
 
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
       app.setMCPServerActive(true);
 
-      const request1 = bridge.sendRequest('/api/test1', {});
-      const request2 = bridge.sendRequest('/api/test2', {});
+      const request1 = bridge.sendRequest('/api/test1', {}, { sessionId: 'studio-a' });
+      const request2 = bridge.sendRequest('/api/test2', {}, { sessionId: 'studio-a' });
       request1.catch(() => {});
       request2.catch(() => {});
 
-      let poll = await request(app).get('/poll').expect(200);
+      let poll = await request(app).get('/poll?sessionId=studio-a').expect(200);
       expect(poll.body.request).toBeTruthy();
 
-      await request(app).post('/disconnect').expect(200);
+      await request(app).post('/disconnect').send({ sessionId: 'studio-a' }).expect(200);
 
       await expect(request1).rejects.toThrow('Connection closed');
       await expect(request2).rejects.toThrow('Connection closed');
 
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
 
       const newRequestPromise = bridge.sendRequest('/api/test3', {});
 
-      poll = await request(app).get('/poll').expect(200);
+      poll = await request(app).get('/poll?sessionId=studio-a').expect(200);
       expect(poll.body.request?.endpoint).toBe('/api/test3');
 
       await request(app)
         .post('/response')
         .send({
+          sessionId: 'studio-a',
           requestId: poll.body.requestId,
           response: { success: true }
         })
@@ -174,31 +181,33 @@ describe('Integration Tests', () => {
       await request(app).get('/poll').expect(503);
 
       health = await request(app).get('/health').expect(200);
-      expect(health.body.pluginConnected).toBe(true);
+      expect(health.body.pluginConnected).toBe(false);
       expect(health.body.mcpServerActive).toBe(false);
+      expect(health.body.plugin.polling).toBe(true);
+      expect(health.body.plugin.ready).toBe(false);
 
       app.setMCPServerActive(true);
 
       const poll = await request(app).get('/poll').expect(200);
       expect(poll.body.mcpConnected).toBe(true);
-      expect(poll.body.pluginConnected).toBe(true);
+      expect(poll.body.pluginConnected).toBe(false);
+      expect(poll.body.plugin.polling).toBe(true);
+      expect(poll.body.plugin.ready).toBe(false);
     });
   });
 
   describe('Timeout Handling', () => {
     test('should handle request timeouts', async () => {
-      jest.useFakeTimers();
-
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
       app.setMCPServerActive(true);
 
+      jest.useFakeTimers();
       const timeoutPromise = bridge.sendRequest('/api/slow-endpoint', {});
+      const expectPromise = expect(timeoutPromise).rejects.toThrow('Request timeout');
 
-      await request(app).get('/poll').expect(200);
+      await jest.advanceTimersByTimeAsync(31000);
 
-      jest.advanceTimersByTime(31000);
-
-      await expect(timeoutPromise).rejects.toThrow('Request timeout');
+      await expectPromise;
 
       jest.useRealTimers();
     });
@@ -206,7 +215,7 @@ describe('Integration Tests', () => {
 
   describe('Structure Map Diagnostics Flow', () => {
     test('should surface structure map cache fields in diagnostics after MCP activation', async () => {
-      await request(app).post('/ready').expect(200);
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
       app.setMCPServerActive(true);
 
       const diagnostics = await request(app)
@@ -218,6 +227,17 @@ describe('Integration Tests', () => {
       expect(payload.runtime.structureMap).toBeTruthy();
       expect(payload.runtime.structureMap.cache).toBeTruthy();
       expect(payload.runtime.structureMap.summaries).toBeTruthy();
+    });
+
+    test('should keep diagnostics capability flags aligned with implemented plugin endpoints', async () => {
+      await request(app).post('/ready').send(READY_PAYLOAD).expect(200);
+      app.setMCPServerActive(true);
+
+      const diagnostics = await request(app).get('/diagnostics').expect(200);
+
+      expect(diagnostics.body.serverCapabilities.setScriptSourceFast).toBe(false);
+      expect(diagnostics.body.serverCapabilities.batchScriptEdits).toBe(false);
+      expect(diagnostics.body.serverCapabilities.replaceScriptFunction).toBe(true);
     });
   });
 });

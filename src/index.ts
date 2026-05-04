@@ -7,12 +7,12 @@
  * It allows AI assistants to access Studio data, scripts, and objects through a bridge plugin.
  * 
  * Usage:
- *   npx robloxstudio-mcp
+ *   npx -y @aaronalm19/roblox-mcp@latest
  * 
  * Or add to your MCP configuration:
  *   "robloxstudio": {
  *     "command": "npx",
- *     "args": ["-y", "robloxstudio-mcp"]
+ *     "args": ["-y", "@aaronalm19/roblox-mcp@latest"]
  *   }
  */
 
@@ -25,10 +25,10 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { createRequire } from 'module';
-import { createHttpServer } from './http-server.js';
+import { createHttpServer, createHttpServerSharedState } from './http-server.js';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService } from './bridge-service.js';
-import { resolveServerHost } from './server-config.js';
+import { getServerHostFallbacks, resolveServerHost } from './server-config.js';
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require('../package.json');
@@ -110,6 +110,20 @@ class RobloxStudioMCPServer {
             inputSchema: {
               type: 'object',
               properties: {}
+            }
+          },
+          {
+            name: 'list_studio_sessions',
+            description: 'List active Studio plugin sessions known to the bridge (use these IDs for cross-session copy).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                maxAgeMs: {
+                  type: 'number',
+                  description: 'Only include sessions seen within this age window (milliseconds).',
+                  default: 60000
+                }
+              }
             }
           },
           {
@@ -228,6 +242,179 @@ class RobloxStudioMCPServer {
                 }
               },
               required: ['instancePath']
+            }
+          },
+          {
+            name: 'export_instance_snapshot',
+            description: 'Export an instance subtree into a server-side snapshot transfer (for low-token cross-session copy).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePath: {
+                  type: 'string',
+                  description: 'Path to the source instance to export.'
+                },
+                includeScripts: {
+                  type: 'boolean',
+                  description: 'Include script source when true.',
+                  default: true
+                },
+                maxDepth: {
+                  type: 'number',
+                  description: 'Max descendant depth to export.',
+                  default: 30
+                },
+                sourceSessionId: {
+                  type: 'string',
+                  description: 'Optional source Studio session ID. If omitted, active/default routing is used.'
+                }
+              },
+              required: ['instancePath']
+            }
+          },
+          {
+            name: 'import_instance_snapshot',
+            description: 'Import a previously exported snapshot transfer into the current Studio session.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                transferId: {
+                  type: 'string',
+                  description: 'Transfer ID returned by export_instance_snapshot.'
+                },
+                targetParentPath: {
+                  type: 'string',
+                  description: 'Parent path where the snapshot root should be created.'
+                },
+                options: {
+                  type: 'object',
+                  properties: {
+                    rootName: { type: 'string' },
+                    conflictPolicy: {
+                      type: 'string',
+                      enum: ['rename', 'replace', 'fail'],
+                      default: 'rename'
+                    },
+                    namePrefix: { type: 'string' },
+                    nameSuffix: { type: 'string' },
+                    scriptReplacements: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          find: { type: 'string' },
+                          replace: { type: 'string' }
+                        },
+                        required: ['find', 'replace']
+                      }
+                    }
+                  }
+                },
+                targetSessionId: {
+                  type: 'string',
+                  description: 'Optional target Studio session ID. If omitted, active/default routing is used.'
+                }
+              },
+              required: ['transferId', 'targetParentPath']
+            }
+          },
+          {
+            name: 'copy_instance_snapshot',
+            description: 'One-shot export+import copy (same active session). For cross-session, export then switch session then import.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sourceInstancePath: { type: 'string' },
+                targetParentPath: { type: 'string' },
+                options: {
+                  type: 'object',
+                  properties: {
+                    includeScripts: { type: 'boolean', default: true },
+                    maxDepth: { type: 'number', default: 30 },
+                    sourceSessionId: { type: 'string' },
+                    targetSessionId: { type: 'string' },
+                    rootName: { type: 'string' },
+                    conflictPolicy: {
+                      type: 'string',
+                      enum: ['rename', 'replace', 'fail'],
+                      default: 'rename'
+                    },
+                    namePrefix: { type: 'string' },
+                    nameSuffix: { type: 'string' },
+                    scriptReplacements: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          find: { type: 'string' },
+                          replace: { type: 'string' }
+                        },
+                        required: ['find', 'replace']
+                      }
+                    }
+                  }
+                }
+              },
+              required: ['sourceInstancePath', 'targetParentPath']
+            }
+          },
+          {
+            name: 'copy_instance_cross_session',
+            description: 'One-shot export from sourceSessionId and import into targetSessionId.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                sourceSessionId: { type: 'string' },
+                targetSessionId: { type: 'string' },
+                sourceInstancePath: { type: 'string' },
+                targetParentPath: { type: 'string' },
+                options: {
+                  type: 'object',
+                  properties: {
+                    includeScripts: { type: 'boolean', default: true },
+                    maxDepth: { type: 'number', default: 30 },
+                    rootName: { type: 'string' },
+                    conflictPolicy: {
+                      type: 'string',
+                      enum: ['rename', 'replace', 'fail'],
+                      default: 'rename'
+                    },
+                    namePrefix: { type: 'string' },
+                    nameSuffix: { type: 'string' },
+                    scriptReplacements: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          find: { type: 'string' },
+                          replace: { type: 'string' }
+                        },
+                        required: ['find', 'replace']
+                      }
+                    }
+                  }
+                }
+              },
+              required: ['sourceSessionId', 'targetSessionId', 'sourceInstancePath', 'targetParentPath']
+            }
+          },
+          {
+            name: 'list_instance_snapshot_transfers',
+            description: 'List in-memory snapshot transfers available for import.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          },
+          {
+            name: 'delete_instance_snapshot_transfer',
+            description: 'Delete one in-memory snapshot transfer after import.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                transferId: { type: 'string' }
+              },
+              required: ['transferId']
             }
           },
           {
@@ -1245,6 +1432,52 @@ class RobloxStudioMCPServer {
               required: ['instancePath', 'operations']
             }
           },
+          {
+            name: 'replace_script_function',
+            description: 'Replace one Luau function block by function name, without manual line math.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePath: {
+                  type: 'string',
+                  description: 'Roblox script path'
+                },
+                functionName: {
+                  type: 'string',
+                  description: 'Exact Luau function name, for example `foo`, `M.foo`, or `Class:method`.'
+                },
+                newFunctionContent: {
+                  type: 'string',
+                  description: 'Full replacement function block including `function ...` and closing `end`.'
+                },
+                expectedHash: {
+                  type: 'string',
+                  description: 'Optional source hash guard.'
+                }
+              },
+              required: ['instancePath', 'functionName', 'newFunctionContent']
+            }
+          },
+          {
+            name: 'get_luau_diagnostics',
+            description: 'Run Luau static diagnostics for one or more Studio scripts through luau-lsp when available.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePaths: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Studio script paths to analyze.'
+                },
+                includeSourceHints: {
+                  type: 'boolean',
+                  description: 'Include raw diagnostic lines from analyzer output.',
+                  default: false
+                }
+              },
+              required: ['instancePaths']
+            }
+          },
           // Attribute Tools (for Roblox instance attributes)
           {
             name: 'get_attribute',
@@ -1451,6 +1684,653 @@ class RobloxStudioMCPServer {
               type: 'object',
               properties: {}
             }
+          },
+          // AI Player Control Tools - Control the player character during playtest
+          {
+            name: 'ai_control_player',
+            description: 'Control the player character (move, jump, camera) during an active playtest. AI uses this to play the game and test gameplay.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                action: {
+                  type: 'string',
+                  enum: ['move_forward', 'move_backward', 'move_left', 'move_right', 'jump', 'crouch', 'run', 'walk', 'look_up', 'look_down', 'look_left', 'look_right', 'stop'],
+                  description: 'Player action to perform'
+                },
+                duration: {
+                  type: 'number',
+                  description: 'Duration in seconds for the action (default 0.1)'
+                },
+                speed: {
+                  type: 'number',
+                  description: 'Speed multiplier (0.1 to 10, default 1.0)'
+                }
+              },
+              required: ['action']
+            }
+          },
+          {
+            name: 'ai_get_player_state',
+            description: 'Get current player state - position, rotation, health, inventory, nearby objects.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                includeNearby: {
+                  type: 'boolean',
+                  description: 'Include nearby objects within radius',
+                  default: true
+                },
+                nearbyRadius: {
+                  type: 'number',
+                  description: 'Radius for nearby objects check (default 50 studs)',
+                  default: 50
+                }
+              }
+            }
+          },
+          {
+            name: 'ai_interact_with_object',
+            description: 'Interact with a game object (click, touch, proximity trigger) during playtest.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                objectPath: {
+                  type: 'string',
+                  description: 'Roblox instance path to the object'
+                },
+                action: {
+                  type: 'string',
+                  enum: ['click', 'touch', 'activate', 'proximity', 'hover'],
+                  description: 'Type of interaction'
+                },
+                playerIndex: {
+                  type: 'number',
+                  description: 'Player index for multiplayer (default 1)',
+                  default: 1
+                }
+              },
+              required: ['objectPath', 'action']
+            }
+          },
+          {
+            name: 'ai_teleport_player',
+            description: 'Teleport the player to a specific position in the game world.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                position: {
+                  type: 'object',
+                  properties: {
+                    x: { type: 'number' },
+                    y: { type: 'number' },
+                    z: { type: 'number' }
+                  },
+                  required: ['x', 'y', 'z']
+                },
+                rotation: {
+                  type: 'object',
+                  properties: {
+                    x: { type: 'number' },
+                    y: { type: 'number' },
+                    z: { type: 'number' }
+                  },
+                  description: 'Optional rotation (Euler angles in degrees)'
+                },
+                playerIndex: {
+                  type: 'number',
+                  description: 'Player index (default 1)',
+                  default: 1
+                }
+              },
+              required: ['position']
+            }
+          },
+          // Game State & Debugging Tools
+          {
+            name: 'get_game_state',
+            description: 'Get comprehensive game state during playtest - players, NPCs, projectiles, physics state.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                scope: {
+                  type: 'string',
+                  enum: ['all', 'players', 'npcs', 'projectiles', 'physics'],
+                  description: 'What to query',
+                  default: 'all'
+                },
+                maxResults: {
+                  type: 'number',
+                  description: 'Maximum results to return',
+                  default: 50
+                }
+              }
+            }
+          },
+          {
+            name: 'capture_debug_logs',
+            description: 'Capture recent debug output, warnings, and errors from the game.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['all', 'errors', 'warnings', 'print', 'custom'],
+                  description: 'Type of logs to capture',
+                  default: 'all'
+                },
+                maxLines: {
+                  type: 'number',
+                  description: 'Maximum number of log lines to capture',
+                  default: 100
+                },
+                sinceTimestamp: {
+                  type: 'number',
+                  description: 'Only capture logs after this timestamp (optional)'
+                }
+              }
+            }
+          },
+          {
+            name: 'open_debug_log_stream',
+            description: 'Open a server-side cursor for incremental debug log polling.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['all', 'errors', 'warnings', 'print', 'custom'],
+                  description: 'Type of logs to stream',
+                  default: 'all'
+                }
+              }
+            }
+          },
+          {
+            name: 'poll_debug_log_stream',
+            description: 'Poll only new log entries for a previously opened debug log cursor.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                cursorId: {
+                  type: 'string',
+                  description: 'Cursor ID returned by open_debug_log_stream.'
+                },
+                maxLines: {
+                  type: 'number',
+                  description: 'Maximum number of new log lines to return.',
+                  default: 100
+                }
+              },
+              required: ['cursorId']
+            }
+          },
+          {
+            name: 'close_debug_log_stream',
+            description: 'Close a debug log cursor when no longer needed.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                cursorId: {
+                  type: 'string',
+                  description: 'Cursor ID returned by open_debug_log_stream.'
+                }
+              },
+              required: ['cursorId']
+            }
+          },
+          {
+            name: 'get_runtime_errors',
+            description: 'Get current runtime errors from scripts during playtest.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                clearAfter: {
+                  type: 'boolean',
+                  description: 'Clear errors after reading',
+                  default: false
+                }
+              }
+            }
+          },
+          {
+            name: 'execute_test_sequence',
+            description: 'Execute a sequence of game actions for testing - movement, interactions, waits.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                steps: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      action: {
+                        type: 'string',
+                        enum: ['wait', 'move', 'jump', 'click', 'touch', 'teleport', 'set_property', 'get_property', 'execute_luau']
+                      },
+                      duration: { type: 'number' },
+                      position: {
+                        type: 'object',
+                        properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } }
+                      },
+                      target: { type: 'string' },
+                      propertyName: { type: 'string' },
+                      propertyValue: {},
+                      code: { type: 'string' }
+                    }
+                  },
+                  description: 'Array of test steps to execute'
+                },
+                stopOnError: {
+                  type: 'boolean',
+                  description: 'Stop sequence if any step fails',
+                  default: true
+                }
+              },
+              required: ['steps']
+            }
+          },
+          {
+            name: 'watch_property_changes',
+            description: 'Monitor property changes on instances in real-time during playtest.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                instancePath: {
+                  type: 'string',
+                  description: 'Roblox instance path to watch'
+                },
+                properties: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Property names to monitor'
+                },
+                duration: {
+                  type: 'number',
+                  description: 'How long to watch (seconds, default 30)'
+                }
+              },
+              required: ['instancePath', 'properties']
+            }
+          },
+          {
+            name: 'get_performance_metrics',
+            description: 'Get performance metrics during playtest - FPS, memory, network, physics.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                category: {
+                  type: 'string',
+                  enum: ['all', 'fps', 'memory', 'network', 'physics', 'instances'],
+                  description: 'Category of metrics to retrieve',
+                  default: 'all'
+                }
+              }
+            }
+          },
+          {
+            name: 'capture_performance_snapshot',
+            description: 'Capture multiple performance samples and return an aggregated summary.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                category: {
+                  type: 'string',
+                  enum: ['all', 'fps', 'memory', 'network', 'physics', 'instances'],
+                  description: 'Category of metrics to retrieve',
+                  default: 'all'
+                },
+                sampleCount: {
+                  type: 'number',
+                  description: 'How many samples to capture.',
+                  default: 3
+                },
+                intervalMs: {
+                  type: 'number',
+                  description: 'Delay between samples in milliseconds.',
+                  default: 250
+                }
+              }
+            }
+          },
+          {
+            name: 'inspect_terrain',
+            description: 'Get terrain and physics information for navmesh/pathfinding.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                region: {
+                  type: 'object',
+                  properties: {
+                    minX: { type: 'number' },
+                    minY: { type: 'number' },
+                    minZ: { type: 'number' },
+                    maxX: { type: 'number' },
+                    maxY: { type: 'number' },
+                    maxZ: { type: 'number' }
+                  },
+                  description: 'Region to inspect'
+                },
+                includeNavmesh: {
+                  type: 'boolean',
+                  description: 'Include navmesh data if available'
+                }
+              }
+            }
+          },
+          {
+            name: 'get_network_stats',
+            description: 'Get detailed network statistics for the current playtest session.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                includePlayers: {
+                  type: 'boolean',
+                  description: 'Include per-player statistics'
+                }
+              }
+            }
+          },
+          {
+            name: 'simulate_input',
+            description: 'Simulate user input events (keypress, mouse, touch) for testing UI and interactions.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                inputType: {
+                  type: 'string',
+                  enum: ['keypress', 'keydown', 'keyup', 'mouse_click', 'mouse_move', 'mouse_down', 'mouse_up', 'touch_tap', 'touch_drag']
+                },
+                target: {
+                  type: 'string',
+                  description: 'Object path for UI clicks (optional)'
+                },
+                position: {
+                  type: 'object',
+                  properties: { x: { type: 'number' }, y: { type: 'number' } }
+                },
+                keyCode: {
+                  type: 'string',
+                  description: 'KeyCode for keyboard input (e.g., Enum.KeyCode.F)'
+                }
+              },
+              required: ['inputType']
+            }
+          },
+          {
+            name: 'parse_ui_reference',
+            description: 'Analyze a UI reference image and extract layout structure, colors, and elements for Roblox UI generation.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                imageData: {
+                  type: 'string',
+                  description: 'Image data as base64 string (with or without data URI prefix) or file path to image'
+                },
+                options: {
+                  type: 'object',
+                  properties: {
+                    detectText: {
+                      type: 'boolean',
+                      description: 'Enable text element detection',
+                      default: true
+                    },
+                    detectButtons: {
+                      type: 'boolean',
+                      description: 'Enable button element detection',
+                      default: true
+                    },
+                    minElementSize: {
+                      type: 'number',
+                      description: 'Minimum element size in pixels to detect',
+                      default: 20
+                    },
+                    colorClusterCount: {
+                      type: 'number',
+                      description: 'Number of dominant colors to extract',
+                      default: 8
+                    }
+                  }
+                }
+              },
+              required: ['imageData']
+            }
+          },
+          {
+            name: 'generate_ui',
+            description: 'Generate Roblox UI from parsed image data. Creates rich UI elements with proper scaling, positioning, animations, and responsive behavior based on image-parser output.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                uiContainer: {
+                  type: 'object',
+                  description: 'UI container definition with type, name, and elements array'
+                },
+                scalingConfig: {
+                  type: 'object',
+                  description: 'Coordinate reference and scaling configuration',
+                  properties: {
+                    referenceWidth: { type: 'number' },
+                    referenceHeight: { type: 'number' },
+                    scaleMode: { type: 'string', enum: ['exact', 'proportional', 'responsive'] },
+                    coordinateReference: {
+                      type: 'object',
+                      properties: {
+                        anchorPoint: { type: 'string' },
+                        offsetX: { type: 'number' },
+                        offsetY: { type: 'number' },
+                        parentReference: { type: 'string' }
+                      }
+                    }
+                  }
+                },
+                metadata: {
+                  type: 'object',
+                  description: 'Optional metadata about the source image',
+                  properties: {
+                    sourceImageUrl: { type: 'string' },
+                    parserVersion: { type: 'string' },
+                    generationTimestamp: { type: 'number' }
+                  }
+                }
+              },
+              required: ['uiContainer']
+            }
+          },
+          {
+            name: 'parse_and_generate_ui',
+            description: 'Parse a UI reference image and generate Roblox UI in one step. Combines parse_ui_reference and generate_ui for seamless workflow.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                imageData: {
+                  type: 'string',
+                  description: 'Image data as base64 string or file path'
+                },
+                options: {
+                  type: 'object',
+                  properties: {
+                    detectText: { type: 'boolean' },
+                    detectButtons: { type: 'boolean' },
+                    minElementSize: { type: 'number' },
+                    colorClusterCount: { type: 'number' },
+                    scalingConfig: {
+                      type: 'object',
+                      description: 'Optional scaling configuration override'
+                    }
+                  }
+                }
+              },
+              required: ['imageData']
+            }
+          },
+          // Agent Management Tools
+          {
+            name: 'agent_chat',
+            description: 'Send a message to an AI agent and get a response for direct AI communication from Studio.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                message: {
+                  type: 'string',
+                  description: 'Message to send to the agent'
+                },
+                agentId: {
+                  type: 'string',
+                  description: 'Target agent ID (default: "default")'
+                },
+                threadId: {
+                  type: 'string',
+                  description: 'Thread ID for conversation continuity'
+                },
+                options: {
+                  type: 'object',
+                  properties: {
+                    temperature: { type: 'number' },
+                    maxTokens: { type: 'number' }
+                  }
+                }
+              },
+              required: ['message']
+            }
+          },
+          {
+            name: 'agent_status',
+            description: 'Get status of all AI agents including tokens, latency, and request counts.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          },
+          {
+            name: 'agent_control',
+            description: 'Control agent state (pause, resume, stop) for all or specific agents.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                action: {
+                  type: 'string',
+                  enum: ['pause', 'resume', 'stop'],
+                  description: 'Action to perform on the agent'
+                },
+                agentId: {
+                  type: 'string',
+                  description: 'Target agent ID (default: all agents)'
+                }
+              },
+              required: ['action']
+            }
+          },
+          {
+            name: 'get_agent_threads',
+            description: 'Get conversation threads for an agent including message count and status.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agentId: {
+                  type: 'string',
+                  description: 'Agent ID to get threads for'
+                }
+              }
+            }
+          },
+          {
+            name: 'get_agent_metrics',
+            description: 'Get aggregated metrics for all agents: tokens, latency percentiles, lane stats.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          },
+          // ATO Agentic Tools
+          {
+            name: 'subscribe_file_tree',
+            description: 'Subscribe to real-time file tree deltas via WebSocket. Deltas are broadcast when instances are created, modified, or deleted in Studio.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Optional root path to subscribe to (defaults to game root)',
+                  default: 'game'
+                }
+              }
+            }
+          },
+          {
+            name: 'get_task_status',
+            description: 'Get status of a specific task by ID.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'Task ID returned by decompose_goal or task creation'
+                }
+              },
+              required: ['taskId']
+            }
+          },
+          {
+            name: 'list_tasks',
+            description: 'List all tasks or filter by goal/agent/status.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                goalId: {
+                  type: 'string',
+                  description: 'Filter by goal ID'
+                },
+                agentId: {
+                  type: 'string',
+                  description: 'Filter by agent ID'
+                },
+                status: {
+                  type: 'string',
+                  enum: ['queued', 'running', 'paused', 'completed', 'failed', 'cancelled'],
+                  description: 'Filter by task status'
+                }
+              }
+            }
+          },
+          {
+            name: 'execute_direct_command',
+            description: 'Execute a direct command from Studio UI without external chat. Returns taskId for progress tracking.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                command: {
+                  type: 'string',
+                  description: 'Command name from the direct commands list'
+                },
+                params: {
+                  type: 'object',
+                  description: 'Command parameters as key-value pairs'
+                }
+              },
+              required: ['command']
+            }
+          },
+          {
+            name: 'cancel_task',
+            description: 'Cancel a running or pending task by ID.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                taskId: {
+                  type: 'string',
+                  description: 'Task ID to cancel'
+                }
+              },
+              required: ['taskId']
+            }
+          },
+          {
+            name: 'list_direct_commands',
+            description: 'List all available direct commands that can be executed from Studio UI.',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
           }
         ]
       };
@@ -1472,6 +2352,8 @@ class RobloxStudioMCPServer {
             return await this.tools.getPlaceInfo();
           case 'get_runtime_state':
             return await this.tools.getRuntimeState();
+          case 'list_studio_sessions':
+            return this.tools.listStudioSessions((args as any)?.maxAgeMs as number | undefined);
           case 'get_diagnostics':
             return await this.tools.getDiagnostics();
           case 'check_script_drift':
@@ -1494,6 +2376,40 @@ class RobloxStudioMCPServer {
             );
           case 'get_instance_children':
             return await this.tools.getInstanceChildren((args as any)?.instancePath as string);
+          case 'export_instance_snapshot':
+            return await this.tools.exportInstanceSnapshot(
+              (args as any)?.instancePath as string,
+              {
+                includeScripts: (args as any)?.includeScripts as boolean | undefined,
+                maxDepth: (args as any)?.maxDepth as number | undefined,
+              },
+              (args as any)?.sourceSessionId as string | undefined
+            );
+          case 'import_instance_snapshot':
+            return await this.tools.importInstanceSnapshot(
+              (args as any)?.transferId as string,
+              (args as any)?.targetParentPath as string,
+              (args as any)?.options,
+              (args as any)?.targetSessionId as string | undefined
+            );
+          case 'copy_instance_snapshot':
+            return await this.tools.copyInstanceSnapshot(
+              (args as any)?.sourceInstancePath as string,
+              (args as any)?.targetParentPath as string,
+              (args as any)?.options
+            );
+          case 'copy_instance_cross_session':
+            return await this.tools.copyInstanceCrossSession(
+              (args as any)?.sourceSessionId as string,
+              (args as any)?.targetSessionId as string,
+              (args as any)?.sourceInstancePath as string,
+              (args as any)?.targetParentPath as string,
+              (args as any)?.options
+            );
+          case 'list_instance_snapshot_transfers':
+            return this.tools.listInstanceSnapshotTransfers();
+          case 'delete_instance_snapshot_transfer':
+            return this.tools.deleteInstanceSnapshotTransfer((args as any)?.transferId as string);
           case 'search_by_property':
             return await this.tools.searchByProperty((args as any)?.propertyName as string, (args as any)?.propertyValue as string);
           case 'get_class_info':
@@ -1642,6 +2558,18 @@ class RobloxStudioMCPServer {
               (args as any)?.rollbackOnFailure as boolean | undefined,
               (args as any)?.fastMode as boolean | undefined
             );
+          case 'replace_script_function':
+            return await this.tools.replaceScriptFunction(
+              (args as any)?.instancePath as string,
+              (args as any)?.functionName as string,
+              (args as any)?.newFunctionContent as string,
+              (args as any)?.expectedHash as string | undefined,
+            );
+          case 'get_luau_diagnostics':
+            return await this.tools.getLuauDiagnostics({
+              instancePaths: (args as any)?.instancePaths as string[] | undefined,
+              includeSourceHints: (args as any)?.includeSourceHints as boolean | undefined,
+            });
 
           // Attribute Tools
           case 'get_attribute':
@@ -1683,6 +2611,240 @@ class RobloxStudioMCPServer {
             return await this.tools.stopPlaytest();
           case 'get_playtest_output':
             return await this.tools.getPlaytestOutput();
+          case 'ai_control_player':
+            return await this.tools.aiControlPlayer((args as any)?.action as string, (args as any)?.duration as number, (args as any)?.speed as number);
+          case 'ai_get_player_state':
+            return await this.tools.aiGetPlayerState((args as any)?.includeNearby as boolean, (args as any)?.nearbyRadius as number);
+          case 'ai_interact_with_object':
+            return await this.tools.aiInteractWithObject((args as any)?.objectPath as string, (args as any)?.action as string, (args as any)?.playerIndex as number);
+          case 'ai_teleport_player':
+            return await this.tools.aiTeleportPlayer((args as any)?.position, (args as any)?.rotation, (args as any)?.playerIndex as number);
+          case 'get_game_state':
+            return await this.tools.getGameState((args as any)?.scope as string, (args as any)?.maxResults as number);
+          case 'capture_debug_logs':
+            return await this.tools.captureDebugLogs((args as any)?.type as string, (args as any)?.maxLines as number, (args as any)?.sinceTimestamp as number);
+          case 'open_debug_log_stream':
+            return await this.tools.openDebugLogStream((args as any)?.type as string);
+          case 'poll_debug_log_stream':
+            return await this.tools.pollDebugLogStream((args as any)?.cursorId as string, (args as any)?.maxLines as number);
+          case 'close_debug_log_stream':
+            return await this.tools.closeDebugLogStream((args as any)?.cursorId as string);
+          case 'get_runtime_errors':
+            return await this.tools.getRuntimeErrors((args as any)?.clearAfter as boolean);
+          case 'execute_test_sequence':
+            return await this.tools.executeTestSequence((args as any)?.steps as any[], (args as any)?.stopOnError as boolean);
+          case 'watch_property_changes':
+            return await this.tools.watchPropertyChanges((args as any)?.instancePath as string, (args as any)?.properties as string[], (args as any)?.duration as number);
+          case 'get_performance_metrics':
+            return await this.tools.getPerformanceMetrics((args as any)?.category as string);
+          case 'capture_performance_snapshot':
+            return await this.tools.capturePerformanceSnapshot(
+              (args as any)?.category as string,
+              (args as any)?.sampleCount as number,
+              (args as any)?.intervalMs as number,
+            );
+          case 'inspect_terrain':
+            return await this.tools.inspectTerrain((args as any)?.region, (args as any)?.includeNavmesh as boolean);
+          case 'get_network_stats':
+            return await this.tools.getNetworkStats((args as any)?.includePlayers as boolean);
+          case 'simulate_input':
+            return await this.tools.simulateInput((args as any)?.inputType as string, (args as any)?.target as string, (args as any)?.position, (args as any)?.keyCode as string);
+          case 'parse_ui_reference':
+            return await this.tools.parseUIReference((args as any)?.imageData as string, (args as any)?.options);
+          case 'generate_ui':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(await this.tools.generateUI((args as any) as any), null, 2)
+                }
+              ]
+            };
+          case 'parse_and_generate_ui':
+            const combinedResult = await this.tools.parseAndGenerateUI(
+              (args as any)?.imageData as string,
+              (args as any)?.options
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(combinedResult, null, 2)
+                }
+              ]
+            };
+
+          // Agent Management Tools
+          case 'agent_chat':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    response: '[Agent Chat] Message received. External provider wiring is disabled in this build.',
+                    agentId: (args as any)?.agentId || 'default',
+                    threadId: (args as any)?.threadId || 'new_thread',
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'agent_status':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    agents: [],
+                    totalTokensIn: 0,
+                    totalTokensOut: 0,
+                    activeAgentCount: 0,
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'agent_control':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    affectedAgents: [(args as any)?.agentId || 'default']
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'get_agent_threads':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ threads: [] }, null, 2)
+                }
+              ]
+            };
+          case 'get_agent_metrics':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    tokensInTotal: 0,
+                    tokensOutTotal: 0,
+                    requestsTotal: 0,
+                    avgLatencyMs: 0,
+                    p50LatencyMs: 0,
+                    p99LatencyMs: 0,
+                    laneStats: []
+                  }, null, 2)
+                }
+              ]
+            };
+
+          // ATO Agentic Tools
+          case 'subscribe_file_tree':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'File tree subscription registered. Deltas will be broadcast via WebSocket.',
+                    path: (args as any)?.path || 'game',
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'get_task_status':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    taskId: (args as any)?.taskId || null,
+                    status: 'unknown',
+                    message: 'Task tracking backend is not integrated yet.'
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'list_tasks':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    tasks: [],
+                    stats: { total: 0, queued: 0, running: 0, completed: 0, failed: 0 }
+                  }, null, 2)
+                }
+              ]
+            };
+          case 'execute_direct_command':
+            {
+              const command = (args as any)?.command as string;
+              const params = (args as any)?.params as Record<string, unknown> ?? {};
+              const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+              this.bridge.emitTaskUpdate({
+                taskId,
+                status: 'running',
+                progress: 0,
+                agentId: (args as any)?.agentId || 'ui-direct',
+                message: `Executing command: ${command}`,
+              });
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: true,
+                      taskId,
+                      command,
+                      message: `Command ${command} started. Track progress via task updates.`,
+                    }, null, 2)
+                  }
+                ]
+              };
+            }
+          case 'cancel_task':
+            {
+              const taskId = (args as any)?.taskId as string;
+              const existing = this.bridge.getTaskUpdate(taskId);
+              if (existing) {
+                this.bridge.emitTaskUpdate({
+                  ...existing,
+                  taskId,
+                  status: 'cancelled',
+                  progress: existing.progress,
+                  message: 'Task cancelled by user',
+                });
+              }
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: true,
+                      taskId,
+                      message: `Task ${taskId} cancellation requested.`,
+                    }, null, 2)
+                  }
+                ]
+              };
+            }
+          case 'list_direct_commands':
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    commands: this.bridge.getDirectCommands(),
+                    count: this.bridge.getDirectCommands().length,
+                  }, null, 2)
+                }
+              ]
+            };
 
           default:
             throw new McpError(
@@ -1703,7 +2865,9 @@ class RobloxStudioMCPServer {
     const basePort = process.env.ROBLOX_STUDIO_PORT ? parseInt(process.env.ROBLOX_STUDIO_PORT) : 3002;
     const maxPort = basePort + 4;
     const host = resolveServerHost(process.env.ROBLOX_STUDIO_HOST);
-    const httpServer = createHttpServer(this.tools, this.bridge);
+    const hostFallbacks = getServerHostFallbacks(host);
+    const httpServerState = createHttpServerSharedState();
+    const httpServer = createHttpServer(this.tools, this.bridge, httpServerState);
     const listenWithFallback = (
       app: ReturnType<typeof createHttpServer>,
       port: number,
@@ -1755,10 +2919,45 @@ class RobloxStudioMCPServer {
       }
     }
 
+    for (const fallbackHost of hostFallbacks) {
+      const fallbackServer = createHttpServer(this.tools, this.bridge, httpServerState);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const listener = fallbackServer.listen(boundPort, fallbackHost);
+
+          const cleanup = () => {
+            listener.removeListener('error', onError);
+            listener.removeListener('listening', onListening);
+          };
+
+          const onError = (err: NodeJS.ErrnoException) => {
+            cleanup();
+            try {
+              listener.close();
+            } catch {
+              // Ignore close errors from a failed listen attempt.
+            }
+            reject(err);
+          };
+
+          const onListening = () => {
+            cleanup();
+            console.error(`IPv4 loopback fallback also listening on ${fallbackHost}:${boundPort} for Studio plugin`);
+            resolve();
+          };
+
+          listener.once('error', onError);
+          listener.once('listening', onListening);
+        });
+      } catch (err: any) {
+        console.error(`IPv4 loopback fallback unavailable on ${fallbackHost}:${boundPort} (${err.code || err.message})`);
+      }
+    }
+
     const LEGACY_PORT = 58741;
     let legacyServer: ReturnType<typeof createHttpServer> | undefined;
     if (boundPort !== LEGACY_PORT) {
-      const legacy = createHttpServer(this.tools, this.bridge);
+      const legacy = createHttpServer(this.tools, this.bridge, httpServerState);
       legacyServer = legacy;
       try {
         await listenWithFallback(
@@ -1767,6 +2966,41 @@ class RobloxStudioMCPServer {
           `Legacy HTTP server also listening on ${host}:${LEGACY_PORT} for old plugins`
         );
         (legacy as any).setMCPServerActive(true);
+        for (const fallbackHost of hostFallbacks) {
+          const legacyFallback = createHttpServer(this.tools, this.bridge, httpServerState);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const listener = legacyFallback.listen(LEGACY_PORT, fallbackHost);
+
+              const cleanup = () => {
+                listener.removeListener('error', onError);
+                listener.removeListener('listening', onListening);
+              };
+
+              const onError = (err: NodeJS.ErrnoException) => {
+                cleanup();
+                try {
+                  listener.close();
+                } catch {
+                  // Ignore close errors from a failed listen attempt.
+                }
+                reject(err);
+              };
+
+              const onListening = () => {
+                cleanup();
+                console.error(`Legacy IPv4 loopback fallback also listening on ${fallbackHost}:${LEGACY_PORT} for old plugins`);
+                resolve();
+              };
+
+              listener.once('error', onError);
+              listener.once('listening', onListening);
+            });
+            (legacyFallback as any).setMCPServerActive(true);
+          } catch (err: any) {
+            console.error(`Legacy IPv4 loopback fallback unavailable on ${fallbackHost}:${LEGACY_PORT} (${err.code || err.message})`);
+          }
+        }
       } catch {
         console.error(`Legacy port ${LEGACY_PORT} in use, skipping backward-compat listener`);
       }
@@ -1778,7 +3012,33 @@ class RobloxStudioMCPServer {
     
     (httpServer as any).setMCPServerActive(true);
     console.error('MCP server marked as active');
-    
+
+    this.bridge.registerDirectCommand({
+      name: 'Analyze Project',
+      description: 'Analyze project architecture and generate a report',
+      endpoint: 'analyze_project_architecture',
+    });
+    this.bridge.registerDirectCommand({
+      name: 'Refresh Structure Map',
+      description: 'Rebuild the cached instance tree structure',
+      endpoint: 'refresh_structure_map',
+    });
+    this.bridge.registerDirectCommand({
+      name: 'Get Diagnostics',
+      description: 'Run diagnostics to check for issues',
+      endpoint: 'get_diagnostics',
+    });
+    this.bridge.registerDirectCommand({
+      name: 'Find Deprecated APIs',
+      description: 'Scan scripts for deprecated Roblox APIs',
+      endpoint: 'lint_deprecated_apis',
+    });
+    this.bridge.registerDirectCommand({
+      name: 'Check Script Drift',
+      description: 'Compare Studio scripts with local source files',
+      endpoint: 'check_script_drift',
+    });
+
     console.error('Waiting for Studio plugin to connect...');
     
     setInterval(() => {

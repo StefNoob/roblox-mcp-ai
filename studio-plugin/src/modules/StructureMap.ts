@@ -1,5 +1,7 @@
-import { CollectionService } from "@rbxts/services";
+import { CollectionService, RunService } from "@rbxts/services";
 import Utils from "./Utils";
+import { buildAgentMappingSnapshot } from "./MappingSummary";
+import { shouldSuspendStructureMap } from "./PlaytestGuard";
 
 const { getInstancePath, getInstanceByPath, readScriptSource } = Utils;
 
@@ -31,6 +33,7 @@ interface QueryFilters {
 	hasSource?: boolean;
 	scriptType?: string;
 	subsystem?: string;
+	summaryStatus?: SummaryStatus;
 	nameQuery?: string;
 	limit?: number;
 }
@@ -42,9 +45,69 @@ let lastBuiltAt = 0;
 let lastReason = "startup";
 const nodesByPath = new Map<string, StructureMapNodeRecord>();
 const roots: string[] = [];
-const watchedNodes = new Map<Instance, RBXScriptConnection[]>();
+const summaryHashesByPath = new Map<string, string>();
 let descendantAddedConnection: RBXScriptConnection | undefined;
 let descendantRemovingConnection: RBXScriptConnection | undefined;
+
+function arrayCount<T>(items: T[]): number {
+	let count = 0;
+	for (const _item of items) {
+		count += 1;
+	}
+	return count;
+}
+
+function isStructureMapSuspended(): boolean {
+	let isRunning = false;
+	let isEdit = false;
+
+	try {
+		isRunning = RunService.IsRunning() === true;
+	} catch {
+		isRunning = false;
+	}
+
+	try {
+		isEdit = RunService.IsEdit() === true;
+	} catch {
+		isEdit = false;
+	}
+
+	if (isRunning && isEdit) {
+		isEdit = false;
+	}
+
+	return shouldSuspendStructureMap({ isRunning, isEdit });
+}
+
+function buildSuspendedAgentMappingSnapshot() {
+	return {
+		headline: "Structure map suspended during playtest",
+		meta: "Playtest runtime data is excluded to keep MCP stable",
+		context: "Stop playtest to refresh the edit-time structure map",
+		roots: [],
+		rootTotal: 0,
+		subsystems: [],
+		subsystemTotal: 0,
+		scripts: [],
+		scriptTotal: 0,
+	};
+}
+
+function buildPendingAgentMappingSnapshot() {
+	return {
+		headline: "Structure map is idle",
+		meta: "No live snapshot built yet",
+		context: "Connect and refresh structure map when you need map-aware context",
+		roots: [],
+		rootTotal: 0,
+		subsystems: [],
+		subsystemTotal: 0,
+		scripts: [],
+		scriptTotal: 0,
+		pendingBuild: true,
+	};
+}
 
 function inferSubsystem(path: string): string | undefined {
 	const cleaned = path.gsub("^game%.", "")[0];
@@ -57,7 +120,7 @@ function inferSubsystem(path: string): string | undefined {
 			}
 		}
 	}
-	return segments.size() >= 2 ? segments[1] : undefined;
+	return arrayCount(segments) >= 2 ? segments[1] : undefined;
 }
 
 function hashText(text: string): string {
@@ -70,26 +133,10 @@ function hashText(text: string): string {
 	return `fnv32:${string.format("%08x", hash)}`;
 }
 
-function watchNode(instance: Instance) {
-	if (watchedNodes.has(instance)) return;
-	const connections: RBXScriptConnection[] = [];
-	connections.push(instance.GetPropertyChangedSignal("Name").Connect(() => markDirty("rename")));
-	connections.push(instance.AncestryChanged.Connect(() => markDirty("ancestry")));
-	watchedNodes.set(instance, connections);
-}
-
-function unwatchNode(instance: Instance) {
-	const existing = watchedNodes.get(instance);
-	if (!existing) return;
-	for (const connection of existing) {
-		connection.Disconnect();
-	}
-	watchedNodes.delete(instance);
-}
-
 function snapshotNode(instance: Instance): StructureMapNodeRecord {
 	const path = getInstancePath(instance);
 	const childPaths = instance.GetChildren().map((child) => getInstancePath(child));
+	const childCount = arrayCount(childPaths);
 	const tags = CollectionService.GetTags(instance);
 	const attributeNames: string[] = [];
 	for (const [name] of pairs(instance.GetAttributes())) {
@@ -102,8 +149,8 @@ function snapshotNode(instance: Instance): StructureMapNodeRecord {
 		className: instance.ClassName,
 		parentPath: instance.Parent ? getInstancePath(instance.Parent) : undefined,
 		childPaths,
-		childCount: childPaths.size(),
-		hasChildren: childPaths.size() > 0,
+		childCount,
+		hasChildren: childCount > 0,
 		hasSource: instance.IsA("LuaSourceContainer"),
 		summaryStatus: "missing",
 		subsystem: inferSubsystem(path),
@@ -115,10 +162,10 @@ function snapshotNode(instance: Instance): StructureMapNodeRecord {
 	if (instance.IsA("BaseScript")) {
 		node.enabled = instance.Enabled;
 	}
-	if (tags.size() > 0) {
+	if (arrayCount(tags) > 0) {
 		node.tags = tags;
 	}
-	if (attributeNames.size() > 0) {
+	if (arrayCount(attributeNames) > 0) {
 		node.attributeNames = attributeNames;
 	}
 
@@ -128,23 +175,23 @@ function snapshotNode(instance: Instance): StructureMapNodeRecord {
 function rebuild() {
 	nodesByPath.clear();
 	roots.clear();
-
-	for (const [instance] of watchedNodes) {
-		unwatchNode(instance);
-	}
-
-	const visit = (instance: Instance) => {
-		watchNode(instance);
-		const node = snapshotNode(instance);
-		nodesByPath.set(node.path, node);
-		for (const child of instance.GetChildren()) {
-			visit(child);
-		}
-	};
+	const stack: Instance[] = [];
 
 	for (const child of game.GetChildren()) {
 		roots.push(getInstancePath(child));
-		visit(child);
+		stack.push(child);
+	}
+
+	while (arrayCount(stack) > 0) {
+		const instance = stack.pop();
+		if (!instance) {
+			continue;
+		}
+		const node = snapshotNode(instance);
+		nodesByPath.set(node.path, node);
+		for (const child of instance.GetChildren()) {
+			stack.push(child);
+		}
 	}
 
 	version += 1;
@@ -152,10 +199,17 @@ function rebuild() {
 	dirty = false;
 }
 
-function ensureFresh() {
+function ensureFresh(autoBuild: boolean = true): boolean {
+	if (isStructureMapSuspended()) {
+		return false;
+	}
 	if (dirty || nodesByPath.size() === 0) {
+		if (!autoBuild) {
+			return false;
+		}
 		rebuild();
 	}
+	return true;
 }
 
 function markDirty(reason: string = "unknown") {
@@ -164,15 +218,42 @@ function markDirty(reason: string = "unknown") {
 }
 
 function ensureScriptHashes() {
-	ensureFresh();
+	if (isStructureMapSuspended()) {
+		return;
+	}
+	if (!ensureFresh()) {
+		return;
+	}
 	for (const [, node] of nodesByPath) {
 		if (!node.hasSource) continue;
 		const instance = getInstanceByPath(node.path);
 		if (instance && instance.IsA("LuaSourceContainer")) {
 			const source = readScriptSource(instance);
 			node.sourceHash = hashText(source);
+			const cachedSummaryHash = summaryHashesByPath.get(node.path);
+			if (!cachedSummaryHash) {
+				node.summaryStatus = "missing";
+			} else if (cachedSummaryHash === node.sourceHash) {
+				node.summaryStatus = "fresh";
+			} else {
+				node.summaryStatus = "stale";
+			}
 		}
 	}
+}
+
+function touchScriptSummary(path: string, sourceHash?: string) {
+	ensureScriptHashes();
+	const node = nodesByPath.get(path);
+	if (!node || !node.hasSource) {
+		return;
+	}
+	const hash = sourceHash ?? node.sourceHash;
+	if (!hash) {
+		return;
+	}
+	summaryHashesByPath.set(path, hash);
+	node.summaryStatus = "fresh";
 }
 
 function shapeNode(node: StructureMapNodeRecord, mode: StructureMapMode): Record<string, unknown> {
@@ -210,7 +291,37 @@ function shapeNode(node: StructureMapNodeRecord, mode: StructureMapMode): Record
 }
 
 function getStructureMapSummary(_requestData?: Record<string, unknown>) {
-	ensureFresh();
+	if (isStructureMapSuspended()) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			nodeCount: nodesByPath.size(),
+			scriptCount: 0,
+			rootCount: arrayCount(roots),
+			roots,
+			dirty: true,
+			lastBuiltAt,
+			lastReason: "playtest-suspended",
+			suspended: true,
+		};
+	}
+	const autoBuild = _requestData?.autoBuild !== false;
+	if (!ensureFresh(autoBuild)) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			nodeCount: nodesByPath.size(),
+			scriptCount: 0,
+			rootCount: arrayCount(roots),
+			roots,
+			dirty: true,
+			lastBuiltAt,
+			lastReason,
+			pendingBuild: true,
+		};
+	}
 	let scriptCount = 0;
 	for (const [, node] of nodesByPath) {
 		if (node.hasSource) scriptCount += 1;
@@ -222,7 +333,7 @@ function getStructureMapSummary(_requestData?: Record<string, unknown>) {
 		version,
 		nodeCount: nodesByPath.size(),
 		scriptCount,
-		rootCount: roots.size(),
+		rootCount: arrayCount(roots),
 		roots,
 		dirty,
 		lastBuiltAt,
@@ -231,7 +342,29 @@ function getStructureMapSummary(_requestData?: Record<string, unknown>) {
 }
 
 function queryStructureMap(requestData: Record<string, unknown>) {
-	ensureFresh();
+	if (isStructureMapSuspended()) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			mode: (requestData.mode as StructureMapMode | undefined) ?? "compact",
+			count: 0,
+			nodes: [],
+			suspended: true,
+		};
+	}
+	const autoBuild = requestData.autoBuild !== false;
+	if (!ensureFresh(autoBuild)) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			mode: (requestData.mode as StructureMapMode | undefined) ?? "compact",
+			count: 0,
+			nodes: [],
+			pendingBuild: true,
+		};
+	}
 	const mode = (requestData.mode as StructureMapMode | undefined) ?? "compact";
 	const filters = (requestData.filters as QueryFilters | undefined) ?? {};
 
@@ -240,6 +373,7 @@ function queryStructureMap(requestData: Record<string, unknown>) {
 	const className = filters.className?.lower();
 	const scriptType = filters.scriptType?.lower();
 	const subsystem = filters.subsystem?.lower();
+	const summaryStatus = filters.summaryStatus;
 	const nameQuery = filters.nameQuery?.lower();
 
 	const matches: Record<string, unknown>[] = [];
@@ -249,10 +383,11 @@ function queryStructureMap(requestData: Record<string, unknown>) {
 		if (filters.hasSource !== undefined && node.hasSource !== filters.hasSource) continue;
 		if (scriptType && (node.scriptType ?? "").lower() !== scriptType) continue;
 		if (subsystem && (node.subsystem ?? "").lower() !== subsystem) continue;
+		if (summaryStatus && node.summaryStatus !== summaryStatus) continue;
 		if (nameQuery && node.name.lower().find(nameQuery)[0] === undefined) continue;
 
 		matches.push(shapeNode(node, mode));
-		if (matches.size() >= limit) break;
+		if (arrayCount(matches) >= limit) break;
 	}
 
 	return {
@@ -260,13 +395,35 @@ function queryStructureMap(requestData: Record<string, unknown>) {
 		placeName: game.Name,
 		version,
 		mode,
-		count: matches.size(),
+		count: arrayCount(matches),
 		nodes: matches,
 	};
 }
 
 function getScriptInventory(requestData: Record<string, unknown>) {
+	if (isStructureMapSuspended()) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			mode: (requestData.mode as StructureMapMode | undefined) ?? "compact",
+			count: 0,
+			scripts: [],
+			suspended: true,
+		};
+	}
 	const mode = (requestData.mode as StructureMapMode | undefined) ?? "compact";
+	if (requestData.autoBuild === false && (dirty || nodesByPath.size() === 0)) {
+		return {
+			placeId: game.PlaceId,
+			placeName: game.Name,
+			version,
+			mode,
+			count: 0,
+			scripts: [],
+			pendingBuild: true,
+		};
+	}
 	ensureScriptHashes();
 	const scripts = [...nodesByPath]
 		.map(([, node]) => node)
@@ -278,14 +435,56 @@ function getScriptInventory(requestData: Record<string, unknown>) {
 		placeName: game.Name,
 		version,
 		mode,
-		count: scripts.size(),
+		count: arrayCount(scripts),
 		scripts,
 	};
 }
 
+function getAgentMappingSnapshot(requestData?: Record<string, unknown>) {
+	if (isStructureMapSuspended()) {
+		return buildSuspendedAgentMappingSnapshot();
+	}
+	const autoBuild = requestData?.autoBuild !== false;
+	if (!ensureFresh(autoBuild)) {
+		return buildPendingAgentMappingSnapshot();
+	}
+	let scriptCount = 0;
+	const nodes = [...nodesByPath].map(([, node]) => {
+		if (node.hasSource) {
+			scriptCount += 1;
+		}
+		return {
+			path: node.path,
+			className: node.className,
+			hasSource: node.hasSource,
+			subsystem: node.subsystem,
+		};
+	});
+
+	return buildAgentMappingSnapshot(
+		{
+			placeName: game.Name,
+			version,
+			nodeCount: nodesByPath.size(),
+			scriptCount,
+			rootCount: arrayCount(roots),
+			roots,
+			lastBuiltAt,
+			lastReason,
+		},
+		nodes,
+	);
+}
+
 function refreshStructureMap(_requestData?: Record<string, unknown>) {
+	if (isStructureMapSuspended()) {
+		return {
+			success: true,
+			suspended: true,
+			...getStructureMapSummary(),
+		};
+	}
 	rebuild();
-	ensureScriptHashes();
 	return {
 		success: true,
 		...getStructureMapSummary(),
@@ -297,15 +496,17 @@ function init() {
 	initialized = true;
 
 	descendantAddedConnection = game.DescendantAdded.Connect((instance) => {
-		watchNode(instance);
+		if (isStructureMapSuspended()) {
+			return;
+		}
 		markDirty("descendant-added");
 	});
 	descendantRemovingConnection = game.DescendantRemoving.Connect((instance) => {
-		unwatchNode(instance);
+		if (isStructureMapSuspended()) {
+			return;
+		}
 		markDirty("descendant-removing");
 	});
-
-	rebuild();
 }
 
 function shutdown() {
@@ -313,11 +514,11 @@ function shutdown() {
 	descendantRemovingConnection?.Disconnect();
 	descendantAddedConnection = undefined;
 	descendantRemovingConnection = undefined;
-	for (const [instance] of watchedNodes) {
-		unwatchNode(instance);
-	}
 	initialized = false;
 	dirty = true;
+	summaryHashesByPath.clear();
+	nodesByPath.clear();
+	roots.clear();
 }
 
 export = {
@@ -327,5 +528,7 @@ export = {
 	getStructureMapSummary,
 	queryStructureMap,
 	getScriptInventory,
+	getAgentMappingSnapshot,
 	refreshStructureMap,
+	touchScriptSummary,
 };

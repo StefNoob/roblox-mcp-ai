@@ -2329,7 +2329,8 @@ export function createHttpServer(
     const wss = new WSWebSocketServer({ noServer: true });
 
     server.on('upgrade', (request, socket, head) => {
-      const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}:${serverPort}`);
+      const host = request.headers.host || (serverPort ? `localhost:${serverPort}` : 'localhost');
+      const url = new URL(request.url || '/', `http://${host}`);
       const pathname = url.pathname;
 
       if (pathname === '/ws/plugin' || pathname === '/ws/agent') {
@@ -2440,6 +2441,19 @@ export function createHttpServer(
     if (server && !((app as any)._wsServer)) {
       (app as any)._wsServer = setupWebSocketServer(server);
     }
+  };
+
+  const originalListen = app.listen.bind(app);
+  (app as any).listen = (...args: Parameters<typeof app.listen>) => {
+    const server = originalListen(...args);
+    (app as any)._server = server;
+    maybeSetupWs();
+    server.once('close', () => {
+      if ((app as any)._server === server) {
+        (app as any)._server = undefined;
+      }
+    });
+    return server;
   };
 
   wsSetupTimeout = setTimeout(maybeSetupWs, 1000);

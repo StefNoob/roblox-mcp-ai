@@ -4,6 +4,7 @@ import { createHttpServer, createHttpServerSharedState } from '../http-server';
 import { RobloxStudioTools } from '../tools/index';
 import { BridgeService } from '../bridge-service';
 import { Application } from 'express';
+import { WebSocket } from 'ws';
 
 describe('HTTP Server', () => {
   let app: Application & any;
@@ -33,6 +34,50 @@ describe('HTTP Server', () => {
         pluginConnected: false,
         mcpServerActive: false
       });
+    });
+  });
+
+  describe('WebSocket Agent Cockpit', () => {
+    test('should accept /ws/agent upgrades after app.listen', async () => {
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+
+      try {
+        const address = server.address();
+        const port = typeof address === 'object' && address ? address.port : 0;
+
+        await new Promise<void>((resolve, reject) => {
+          const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/agent?sessionId=studio-a&agentId=codex`);
+          const timeout = setTimeout(() => {
+            ws.terminate();
+            reject(new Error('Timed out waiting for WebSocket greeting'));
+          }, 3000);
+
+          ws.once('message', (data) => {
+            clearTimeout(timeout);
+            const message = JSON.parse(data.toString());
+            expect(message.type).toBe('pong');
+            expect(message.payload).toMatchObject({
+              sessionId: 'studio-a',
+              agentId: 'codex',
+            });
+            ws.close();
+            resolve();
+          });
+
+          ws.once('error', (error: Error) => {
+            clearTimeout(timeout);
+            reject(error);
+          });
+        });
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error: Error | null) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+      }
     });
   });
 
